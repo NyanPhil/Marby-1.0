@@ -493,7 +493,17 @@ class Kiosk:
         self.reset_session()
         self.coin(20, 38, 32, 32)
         self.t(64, 32, "D' MARBY Coin Exchanger", 19, False, WHITE, "w")
-        self.t(W / 2, 236, "Welcome to\nD' MARBY", 76, True, WHITE)
+        self.t(W / 2, 130, self.tr("Welcome to"), 28, False, SOFT)
+
+        # A native-canvas wordmark keeps the logo sharp on the touchscreen.
+        self.rounded(126, 188, 686, 332, 32, "#112875")
+        self.rounded(120, 176, 680, 320, 32, WHITE, "#DCE5FA", 1)
+        self.c.create_oval(148, 203, 236, 291, fill=TINT, outline="")
+        self.c.create_oval(161, 224, 213, 276, fill="#F6DE98", outline="#D8B35A", width=2)
+        self.c.create_oval(174, 212, 226, 264, fill="#FFD976", outline="#D2A343", width=2)
+        self.t(200, 239, "₱", 32, True, "#805D23")
+        self.t(446, 232, "D’MARBY", 61, True, BLUE)
+        self.t(446, 279, "COIN EXCHANGE", 14, True, GREY)
         self.edge("left", "Contact us", self.go("contact"), w=212)
         self.edge("right", "Start", self.go("exchange_type"), w=212)
 
