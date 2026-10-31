@@ -1,0 +1,104 @@
+{
+  "pulse_map": {
+    "bill": {
+      "5": 50,
+      "10": 100
+    },
+    "coin": {
+      "1": 1,
+      "5": 5,
+      "10": 10,
+      "20": 20
+    }
+  },
+  "bill_pulse_gap_seconds": 3.0,
+  "coin_pulse_gap_seconds": 2.0,
+  "bill_min_edge_seconds": 0.0,
+  "coin_min_edge_seconds": 0.0,
+  "bill_rearm_quiet_seconds": 3.0,
+  "coin_rearm_quiet_seconds": 2.0,
+  "bill_max_frame_seconds": 45.0,
+  "coin_max_frame_seconds": 60.0,
+  "inhibit_verified": {
+    "bill": false,
+    "coin": false
+  },
+  "input_pin": {
+    "bill": 27,
+    "coin": 17
+  },
+  "inhibit_pin": {
+    "bill": 23,
+    "coin": 24
+  },
+  "inhibit_active_high": {
+    "bill": true,
+    "coin": true
+  },
+  "drop_sensor_pin": 22,
+  "sensor_debounce_seconds": 0.08,
+  "drop_timeout_seconds": 2.0,
+  "pca9685_address": "0x40",
+  "inventory_file": "inventory.json",
+  "journal_file": "transaction_state.json",
+  "servos": {
+    "1": {
+      "channel": 8,
+      "enabled": true,
+      "home_angle": 0,
+      "release_angle": 65,
+      "hold_seconds": 0.45,
+      "settle_seconds": 0.3,
+      "min_pulse_us": 1000,
+      "max_pulse_us": 2000,
+      "actuation_range": 180
+    },
+    "5": {
+      "channel": 10,
+      "enabled": true,
+      "home_angle": 0,
+      "release_angle": 65,
+      "hold_seconds": 0.45,
+      "settle_seconds": 0.3,
+      "min_pulse_us": 1000,
+      "max_pulse_us": 2000,
+      "actuation_range": 180
+    },
+    "10": {
+      "channel": 12,
+      "enabled": true,
+      "home_angle": 0,
+      "release_angle": 65,
+      "hold_seconds": 0.45,
+      "settle_seconds": 0.3,
+      "min_pulse_us": 1000,
+      "max_pulse_us": 2000,
+      "actuation_range": 180
+    },
+    "20": {
+      "channel": 14,
+      "enabled": true,
+      "home_angle": 0,
+      "release_angle": 65,
+      "hold_seconds": 0.45,
+      "settle_seconds": 0.3,
+      "min_pulse_us": 1000,
+      "max_pulse_us": 2000,
+      "actuation_range": 180
+    }
+  },
+  "servo_verified": {
+    "1": false,
+    "5": false,
+    "10": false,
+    "20": false
+  },
+  "payout_coins": [
+    1,
+    5,
+    10,
+    20
+  ],
+  "contact_number": "Contact kiosk staff",
+  "servo_mapping_note": "Proposed mapping only: confirm each coin tube and calibrate before setting servo_verified."
+}
