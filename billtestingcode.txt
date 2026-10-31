@@ -1,0 +1,73 @@
+cd ~/Marby
+.venv/bin/python -u - <<'PY'
+from gpiozero import DigitalInputDevice
+from time import monotonic, sleep
+from threading import Lock
+
+PIN = 27
+QUIET_SECONDS = 3.0
+
+lock = Lock()
+count = 0
+total_count = 0
+last_edge = monotonic()
+
+bill = DigitalInputDevice(
+    PIN,
+    pull_up=True,
+    bounce_time=None
+)
+
+def pulse_detected():
+    global count, total_count, last_edge
+
+    with lock:
+        count += 1
+        total_count += 1
+        last_edge = monotonic()
+
+def pulse_ended():
+    global last_edge
+
+    with lock:
+        last_edge = monotonic()
+
+bill.when_activated = pulse_detected
+bill.when_deactivated = pulse_ended
+
+print("=== TB74 SLOW PULSE TEST ===")
+print("Monitoring GPIO27 — physical pin 13")
+print("Quiet period:", QUIET_SECONDS, "seconds")
+print("Insert ONE bill and wait for the group result.")
+print("Press Ctrl+C to stop.\n")
+
+try:
+    while True:
+        sleep(0.05)
+        result = None
+
+        with lock:
+            if (
+                count > 0
+                and monotonic() - last_edge >= QUIET_SECONDS
+                and not bill.is_active
+            ):
+                result = count
+                count = 0
+
+        if result is not None:
+            print(f"Bill pulse group: {result} pulses", flush=True)
+            print("Ready for the next bill.\n", flush=True)
+
+except KeyboardInterrupt:
+    print("\nStopping test.")
+
+finally:
+    bill.close()
+
+    with lock:
+        print("Total pulses recorded this run:", total_count)
+
+        if count:
+            print("Unfinished group at shutdown:", count)
+PY

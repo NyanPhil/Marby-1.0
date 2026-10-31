@@ -32,7 +32,17 @@ Enable I2C in `sudo raspi-config`, restart if prompted, and check the driver:
 sudo i2cdetect -y 1
 ```
 
-The configuration uses PCA9685 address `0x40`. The supplied font files were not attached; the UI uses its existing DejaVu Sans fallback unless Plus Jakarta Sans is installed or the original `fonts/` folder is present.
+The configuration uses PCA9685 address `0x40`.
+
+### Portable fonts and welcome screen
+
+No custom font files, font installation or network access are needed. The UI uses Plus Jakarta Sans if it is already installed, then checks installed system sans-serif families (including Segoe UI on Windows and DejaVu Sans on Raspberry Pi OS). If none match, it uses Tk's default font. Missing optional fonts are handled silently. The app does not copy fonts into your user account or run a font-cache command.
+
+The welcome screen centres “Welcome to”, the solid D’MARBY wordmark and “COIN EXCHANGE” within one white panel. The large logo uses native Tk canvas text with a subtle shadow and no icon. Its width is checked using the selected font to keep it within the panel.
+
+Circular controls, status dots, badges, loading/countdown rings, rounded cards and button ends use transparent antialiased images generated with Python's standard library. This smooths their curved edges without requiring Pillow, image downloads or another package. The app caches the images and spinner frames, and bounds its cache to keep memory use stable.
+
+For an existing installation, replace `dmarby.py` alongside your current `assets.py` and backend modules. Keep your machine's current configuration, inventory, transaction journal and logs. The complete package uses the canonical module filenames without upload suffixes such as `(1)`.
 
 ## Hardware settings to confirm
 
@@ -127,7 +137,7 @@ The supplied frontend uses a timer to simulate a successful cash-in. No real tra
 
 ## Validation
 
-The included tests exercise the actual frontend and backend with simulated Tk, GPIO, time, servo outputs and coin-exit events. They cover complete bill and coin exchanges, wrong bills, ambiguous groups, excess deposits, blocked demo hooks, duplicate confirmation, sensor failures, timeouts, restart protection and asynchronous payout. They do not establish electrical safety, mechanical calibration, real GCash transfers or the display's physical appearance.
+The included tests exercise the actual frontend and backend with simulated Tk, GPIO, time, servo outputs and coin-exit events. They cover complete bill and coin exchanges, wrong bills, ambiguous groups, excess deposits, blocked demo hooks, duplicate confirmation, sensor failures, timeouts, restart protection, asynchronous payout, startup without optional fonts, curve transparency and antialiasing, bounded image caching and spinner image updates. They do not establish electrical safety, mechanical calibration, real GCash transfers or the display's physical appearance.
 
 ## Files
 
@@ -140,5 +150,6 @@ The included tests exercise the actual frontend and backend with simulated Tk, G
 - `marby_service.py`: audited operator reconciliation.
 - `run_marby.sh`: hardware launcher for the integrated frontend.
 - `test_marby.py`, `test_dmarby_integration.py`: simulated checks.
+- `DMARBY_PROJECT_NOTES.md`: project reference and the requested design/portability preferences.
 
 The original README merge-conflict markers and conflicting PHP 20-bill/PHP 2-coin descriptions have been removed.
