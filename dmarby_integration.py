@@ -34,7 +34,8 @@ class KioskHardwareMixin:
         self._payout_coin = None
         self._verified_coin = None
         self.counting_cash = False
-        self.hardware = RealHardware(cfg)
+        self.references = self.make_reference_store()
+        self.hardware = RealHardware(cfg, references=self.references)
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="marby-payout")
         try:
             super().__init__(root)
@@ -104,13 +105,14 @@ class KioskHardwareMixin:
         # These values have already been accepted physically. Persist them
         # before applying frontend target/flow restrictions.
         try:
-            self.hardware.storage.receive(source, value)
+            self.hardware.storage.receive(source, value, flow=self.flow)
         except HardwareFault as exc:
             self.hardware.storage.state.setdefault("uncredited_inputs", []).append(
                 {"source": source, "value": value, "time": time.time()})
             self._hardware_fault(f"Accepted additional cash: {source} PHP {value}. {exc}")
             return
         self.credit = self.hardware.storage.state["credit"]
+        self.transaction_ref = self.hardware.storage.state["reference"]
         self.inserted = [(item["source"], item["value"])
                          for item in self.hardware.storage.state["received"]]
         self.last_input = time.monotonic()
@@ -226,7 +228,8 @@ class KioskHardwareMixin:
             if name in self.jobs:
                 self.root.after_cancel(self.jobs.pop(name))
         from uuid import uuid4
-        info = {"kind": "hardware", "amount": self._owed(), "ref": "HW-" + uuid4().hex[:10].upper(),
+        reference = self.hardware.storage.state.get("reference") or self.transaction_ref
+        info = {"kind": "hardware", "amount": self._owed(), "ref": reference or "HW-" + uuid4().hex[:10].upper(),
                 "bill": None, "detail": str(detail)}
         self.fault = self.incident_info = info
         self.log("hardware_fault", fault_kind=info["kind"], amount=info["amount"],

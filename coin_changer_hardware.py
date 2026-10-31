@@ -13,6 +13,8 @@ import threading
 import time
 from pathlib import Path
 
+from transaction_numbers import TransactionNumbers
+
 BASE = Path(__file__).resolve().parent
 COINS = (0.25, 1, 5, 10, 20)
 
@@ -48,10 +50,12 @@ def project_path(path):
 
 class Storage:
     """Crash-visible journal. Unfinished transactions require an operator."""
-    def __init__(self, cfg):
+    def __init__(self, cfg, references=None):
         self.coins = payout_coins_for(cfg)
         self.path = project_path(cfg.get('journal_file', 'transaction_state.json'))
         self.inventory_path = project_path(cfg.get('inventory_file', 'inventory.json'))
+        self.references = references if references is not None else TransactionNumbers(
+            self.path.with_name('transaction_numbers.sqlite3'), self.path.with_name('transactions.log'))
         self._lock = threading.Lock()
         self.state = json.loads(self.path.read_text(encoding='utf8')) if self.path.exists() else {}
         self.inventory = (
@@ -69,7 +73,7 @@ class Storage:
     def unresolved(self):
         return self.state.get('status') in ('paid', 'dispensing', 'fault')
 
-    def receive(self, source, value):
+    def receive(self, source, value, flow=None):
         with self._lock:
             allowed = {'bill': {50, 100}, 'coin': {1, 5, 10, 20}}
             if (source not in allowed or type(value) is not int
@@ -90,6 +94,13 @@ class Storage:
             self.state['credit'] += value
             self.state['received'].append({'source': source, 'value': value, 'time': time.time()})
             atomic_json(self.path, self.state)
+            # Record received cash first, then attach its durable reference.
+            if not self.state.get('reference'):
+                self.state['reference'] = self.references.allocate(
+                    'cash', 'hardware', dict(self.state, flow=flow))
+                atomic_json(self.path, self.state)
+            else:
+                self.references.record(self.state['reference'], 'open', self.state)
 
     def can_pay(self, plan):
         return (bool(plan) and all(c in self.coins and type(n) is int and n > 0
@@ -159,6 +170,8 @@ class Storage:
             self.state['status'] = 'completed'
             self.state['completed_at'] = time.time()
             atomic_json(self.path, self.state)
+            if self.state.get('reference'):
+                self.references.record(self.state['reference'], 'completed', self.state)
 
     def fault(self, detail):
         with self._lock:
@@ -166,6 +179,8 @@ class Storage:
             self.state['fault'] = str(detail)
             self.state['fault_at'] = time.time()
             atomic_json(self.path, self.state)
+            if self.state.get('reference'):
+                self.references.record(self.state['reference'], 'incident', self.state)
 
 
 class PulseCounter:
@@ -263,7 +278,7 @@ def pulse_counter_for(cfg, source):
 
 
 class RealHardware:
-    def __init__(self, cfg):
+    def __init__(self, cfg, references=None):
         self.cfg = cfg
         self.coins = payout_coins_for(cfg)
         for field in ('bill', 'coin'):
@@ -293,9 +308,13 @@ class RealHardware:
             if len(set(mapping.values())) != len(mapping):
                 raise HardwareFault('Duplicate denominations in ' + source + ' pulse map.')
             self.maps[source] = mapping
-        self.storage = Storage(cfg)
+        self.storage = Storage(cfg, references=references)
         if self.storage.unresolved:
             raise HardwareFault('Unresolved transaction in transaction_state.json; operator must reconcile.')
+        try:
+            self.storage.references.ensure_ready()
+        except Exception as error:
+            raise HardwareFault(f'Transaction numbering storage is unavailable: {error}') from error
         self.accepting = None
         self._accept_lock = threading.RLock()
         self._requested_source = None

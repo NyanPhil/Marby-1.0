@@ -9,6 +9,9 @@ sensor. Bill pulses: 5=PHP 50, 10=PHP 100; coin pulses: 1/5/10/20=PHP 1/5/10/20.
 GCash is simulated in demo mode and unavailable for real cash until a real
 transfer integration is supplied. Hardware transactions never auto-forfeit
 accepted cash on timeout. Existing transaction logs are append-only.
+
+.venv\Scripts\Activate.ps1  
+python dmarby.py --demo --windowed
 """
 
 import json
@@ -25,6 +28,7 @@ from tkinter import font as tkfont
 from tkinter import messagebox
 
 from assets import CURRENCY_PICTURES, IMAGES, SHADOWS, FADES
+from transaction_numbers import TransactionNumbers
 
 # ----------------------------------------------------------------------
 # Settings
@@ -250,6 +254,8 @@ class Kiosk:
         self.spin_angle = 90
         self.spinner = None
         self.jobs = {}
+        if not hasattr(self, "references"):
+            self.references = self.make_reference_store()
         self.reset_session()
 
         self.font_family = choose_font_family(root)
@@ -307,6 +313,7 @@ class Kiosk:
         self.gc_fee = 0
         self.gc_reentry = False
         self.gc_ref = ""
+        self.transaction_ref = ""
         self.dropped = 0
         self.queue = []
         self.done_text = ""
@@ -314,7 +321,23 @@ class Kiosk:
     def tr(self, s):
         return CEBUANO.get(s, s) if self.lang == "ceb" else s
 
+    def make_reference_store(self):
+        return TransactionNumbers(os.path.join(os.path.dirname(LOG_FILE), "transaction_numbers.sqlite3"),
+                                  legacy_log=LOG_FILE)
+
+    def ensure_reference(self):
+        if not self.transaction_ref:
+            self.transaction_ref = self.references.allocate(
+                "gcash" if self.flow == "gcash" else "cash",
+                "demo" if DEMO_MODE else "hardware",
+                {"flow": self.flow, "amount": self.credit})
+        if self.flow == "gcash":
+            self.gc_ref = self.transaction_ref
+        return self.transaction_ref
+
     def log(self, kind, **data):
+        if self.transaction_ref and "ref" not in data:
+            data["ref"] = self.transaction_ref
         record = dict(time=time.strftime("%Y-%m-%d %H:%M:%S"),
                       mode="demo" if DEMO_MODE else "hardware", kind=kind, **data)
         try:
@@ -1167,6 +1190,7 @@ class Kiosk:
     def add_credit(self, kind, value):
         self.credit += value
         self.inserted.append((kind, value))
+        self.ensure_reference()
         self.last_input = time.monotonic()
 
     def s_wrong_bill(self):
@@ -1291,6 +1315,11 @@ class Kiosk:
 
     def finish_dispense(self):
         self.jobs.pop("drop", None)
+        if self.screen != "dispensing" or not self.queue or self.dropped != len(self.queue):
+            return False
+        self.ensure_reference()
+        self.references.record(self.transaction_ref, "completed",
+                               {"flow": self.flow, "amount": self.credit, "plan": self.plan})
         self.log("exchange", flow=self.flow, amount=self.credit, plan=self.plan)
         self.done_text = (f"{money(self.credit)} {self.tr('exchanged into')} "
                           f"{plural(sum(self.plan.values()))}")
@@ -1312,10 +1341,11 @@ class Kiosk:
         self.card(x1, y1, x2, y2)
         cx = W / 2
         self.picture("done", cx, y1 + 90)
-        self.t(cx, y1 + 190, self.tr("Please take your coins"), 32, True, INK)
-        self.t(cx, y1 + 230, self.done_text, 18, True, BLUE)
-        self.c.create_line(x1 + 40, y1 + 262, x2 - 40, y1 + 262, fill=LIGHT, width=2)
-        self.t(cx, y1 + 290, self.tr("Thank you for using D' MARBY!"), 16, True, GREY)
+        self.t(cx, y1 + 180, self.tr("Please take your coins"), 32, True, INK)
+        self.t(cx, y1 + 218, self.done_text, 18, True, BLUE)
+        self.t(cx, y1 + 251, f"Ref. No. {self.transaction_ref}", 20, True, INK)
+        self.c.create_line(x1 + 40, y1 + 274, x2 - 40, y1 + 274, fill=LIGHT, width=2)
+        self.t(cx, y1 + 299, self.tr("Thank you for using D' MARBY!"), 16, True, GREY)
         left = max(0, math.ceil(DONE_S - (time.monotonic() - self.screen_since)))
         self.t(140, 418, f"{self.tr('Back to start in')} {left}s", 16, True, SOFT)
         self.edge("right", "New exchange  →", self.go("welcome"), w=250)
@@ -1328,7 +1358,10 @@ class Kiosk:
         for job in ("drop", "check"):
             if job in self.jobs:
                 self.root.after_cancel(self.jobs.pop(job))
-        ref = ref_number()
+        ref = self.ensure_reference() if self.credit or self.inserted else ref_number()
+        if ref == self.transaction_ref:
+            self.references.record(ref, "incident", {"type": kind, "owed": amount,
+                                                     "flow": self.flow, "inserted": self.inserted})
         self.log("incident", type=kind, owed=amount, flow=self.flow, inserted=self.inserted, ref=ref)
         self.incident_info = dict(kind=kind, amount=amount, ref=ref,
                                   bill=next((v for k, v in self.inserted if k == "bill"), None))
@@ -1534,7 +1567,9 @@ class Kiosk:
             return
         if ok:
             self.gcash_balance -= self.gc_amount
-            self.gc_ref = time.strftime("%H%M %Y %m%d")
+            self.gc_ref = self.ensure_reference()
+            self.references.record(self.gc_ref, "completed", {"amount": self.gc_amount,
+                                   "fee": self.gc_fee, "number": self.masked()})
             self.log("gcash", amount=self.gc_amount, fee=self.gc_fee, number=self.masked(), ref=self.gc_ref)
             self.show("gc_success")
         else:
@@ -1807,8 +1842,10 @@ class Kiosk:
         elif o and o["kind"] in ("timeout_empty", "timeout_money"):
             if now >= o["deadline"]:
                 if o["kind"] == "timeout_money":
+                    ref = self.ensure_reference()
+                    self.references.record(ref, "forfeit", {"amount": self.credit, "flow": self.flow})
                     self.log("forfeit", amount=self.credit, flow=self.flow, inserted=self.inserted,
-                             ref=ref_number())
+                             ref=ref)
                 self.show("welcome")
             else:
                 self.redraw()
