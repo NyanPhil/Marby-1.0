@@ -4,12 +4,14 @@ No Raspberry Pi, acceptor, network payment service or motor is operated.
 Run: python -m unittest -v test_dmarby_integration.py
 """
 import copy
+import io
 import json
 import tempfile
 import types
 import unittest
 from collections import Counter
 from concurrent.futures import Future
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
@@ -133,6 +135,46 @@ class Clock:
 
 class Connected(KioskHardwareMixin, dmarby.Kiosk):
     pass
+
+
+class FontPortabilityTests(unittest.TestCase):
+    def test_system_fonts_work_without_plus_jakarta_sans(self):
+        root = object()
+        for installed, expected in (
+            (("Segoe UI", "Arial"), "Segoe UI"),
+            (("DejaVu Sans",), "DejaVu Sans"),
+            (("Helvetica",), "Helvetica"),
+            (("ARIAL",), "ARIAL"),
+            (("Plus Jakarta Sans", "Segoe UI"), "Plus Jakarta Sans"),
+        ):
+            with self.subTest(installed=installed), patch.object(
+                    dmarby.tkfont, "families", return_value=installed):
+                self.assertEqual(dmarby.choose_font_family(root), expected)
+
+    def test_unrecognized_or_empty_font_inventory_uses_tk_default(self):
+        root = object()
+        default = types.SimpleNamespace(actual=lambda key: "Platform Default")
+        for installed in ((), ("An unfamiliar system family",)):
+            with self.subTest(installed=installed), patch.object(
+                    dmarby.tkfont, "families", return_value=installed), patch.object(
+                    dmarby.tkfont, "nametofont", return_value=default) as named:
+                self.assertEqual(dmarby.choose_font_family(root), "Platform Default")
+                named.assert_called_once_with("TkDefaultFont", root=root)
+
+    def test_kiosk_starts_silently_without_optional_fonts(self):
+        errors = io.StringIO()
+        with patch.object(dmarby, "FULLSCREEN", False), patch.object(
+                dmarby.tk, "PhotoImage", lambda **kwargs: object()), patch.object(
+                dmarby.tk, "Canvas", Canvas), patch.object(
+                dmarby.tkfont, "families", return_value=("DejaVu Sans",)), patch.object(
+                dmarby.tkfont, "Font", Font), redirect_stderr(errors):
+            app = dmarby.Kiosk(Root())
+            try:
+                self.assertEqual(app.font_family, "DejaVu Sans")
+                self.assertEqual(app.screen, "welcome")
+            finally:
+                app.close()
+        self.assertEqual(errors.getvalue(), "")
 
 
 class IntegrationTests(unittest.TestCase):

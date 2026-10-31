@@ -14,8 +14,6 @@ accepted cash on timeout. Existing transaction logs are append-only.
 import json
 import math
 import os
-import shutil
-import subprocess
 import sys
 import time
 import tkinter as tk
@@ -85,37 +83,17 @@ CEBUANO = {
 }
 
 FONT_NAME = "Plus Jakarta Sans"
-FONT_FALLBACK = "DejaVu Sans"
-FONT_FAMILY = FONT_FALLBACK
-FONT_FILES = ("PlusJakartaSans-Regular.ttf", "PlusJakartaSans-Bold.ttf")
+FONT_CANDIDATES = (FONT_NAME, "Inter", "Segoe UI", "SF Pro Text", "Noto Sans",
+                   "DejaVu Sans", "Liberation Sans", "Helvetica", "Arial")
 
 
-def install_bundled_fonts():
-    """Make ./fonts available to Tk. Must run before tk.Tk()."""
-    paths = [os.path.join(BASE_DIR, "fonts", n) for n in FONT_FILES]
-    paths = [p for p in paths if os.path.exists(p)]
-    if not paths:
-        return
-    try:
-        if sys.platform.startswith("win"):
-            import ctypes
-            for p in paths:
-                ctypes.windll.gdi32.AddFontResourceExW(p, 0x10, 0)
-            return
-        target = os.path.expanduser("~/Library/Fonts" if sys.platform == "darwin"
-                                    else "~/.local/share/fonts")
-        os.makedirs(target, exist_ok=True)
-        copied = False
-        for p in paths:
-            dst = os.path.join(target, os.path.basename(p))
-            if not os.path.exists(dst):
-                shutil.copy2(p, dst)
-                copied = True
-        if copied and sys.platform.startswith("linux"):
-            subprocess.run(["fc-cache", "-f", target], check=False,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except OSError as error:
-        print(f"Could not install fonts: {error}", file=sys.stderr)
+def choose_font_family(root):
+    """Use an installed sans-serif or Tk's own default, without installing fonts."""
+    available = {family.casefold(): family for family in tkfont.families(root)}
+    for candidate in FONT_CANDIDATES:
+        if candidate.casefold() in available:
+            return available[candidate.casefold()]
+    return tkfont.nametofont("TkDefaultFont", root=root).actual("family")
 
 
 def money(v):
@@ -190,10 +168,7 @@ class Kiosk:
         self.jobs = {}
         self.reset_session()
 
-        global FONT_FAMILY
-        FONT_FAMILY = FONT_NAME if FONT_NAME in tkfont.families(root) else FONT_FALLBACK
-        if FONT_FAMILY != FONT_NAME:
-            print(f"{FONT_NAME} not found, using {FONT_FALLBACK}.", file=sys.stderr)
+        self.font_family = choose_font_family(root)
 
         root.title("D' MARBY Coin Exchanger")
         root.configure(bg="#0A1A5C")
@@ -268,7 +243,7 @@ class Kiosk:
     def font(self, px, bold):
         key = (px, bold)
         if key not in self.fonts:
-            self.fonts[key] = tkfont.Font(family=FONT_FAMILY, size=-px,
+            self.fonts[key] = tkfont.Font(root=self.root, family=self.font_family, size=-px,
                                           weight="bold" if bold else "normal")
         return self.fonts[key]
 
@@ -493,17 +468,48 @@ class Kiosk:
         self.reset_session()
         self.coin(20, 38, 32, 32)
         self.t(64, 32, "D' MARBY Coin Exchanger", 19, False, WHITE, "w")
-        self.t(W / 2, 130, self.tr("Welcome to"), 28, False, SOFT)
 
-        # A native-canvas wordmark keeps the logo sharp on the touchscreen.
-        self.rounded(126, 188, 686, 332, 32, "#112875")
-        self.rounded(120, 176, 680, 320, 32, WHITE, "#DCE5FA", 1)
-        self.c.create_oval(148, 203, 236, 291, fill=TINT, outline="")
-        self.c.create_oval(161, 224, 213, 276, fill="#F6DE98", outline="#D8B35A", width=2)
-        self.c.create_oval(174, 212, 226, 264, fill="#FFD976", outline="#D2A343", width=2)
-        self.t(200, 239, "₱", 32, True, "#805D23")
-        self.t(446, 232, "D’MARBY", 61, True, BLUE)
-        self.t(446, 279, "COIN EXCHANGE", 14, True, GREY)
+        # One compact brand panel; the greeting sits just above the logo.
+        self.rounded(116, 130, 692, 338, 28, "#112875")
+        self.rounded(112, 124, 688, 332, 28, WHITE)
+        self.t(W / 2, 168, self.tr("Welcome to"), 36, False, GREY)
+
+        # Measure the wordmark so the whole lockup stays centred with any font.
+        wordmark = "D’MARBY"
+        wordmark_px = 60
+        while self.measure(wordmark, wordmark_px, True) > 394 and wordmark_px > 36:
+            wordmark_px -= 1
+        wordmark_width = self.measure(wordmark, wordmark_px, True)
+        lockup_left = (W - (92 + 22 + wordmark_width)) / 2
+        cx, cy = lockup_left + 46, 251
+        text_left = lockup_left + 114
+
+        # Soft layered shadow keeps the emblem lifted from the white panel.
+        for radius, colour in ((48, "#F2F4F8"), (47, "#E3E8F1"), (46, "#C2CDDF")):
+            self.c.create_oval(cx + 3 - radius, cy + 5 - radius,
+                               cx + 3 + radius, cy + 5 + radius, fill=colour, outline="")
+        # Coin-and-exchange emblem drawn in Tk: no image or font downloads.
+        self.c.create_oval(cx - 46, cy - 46, cx + 46, cy + 46, fill=BLUE, outline="")
+        self.c.create_oval(cx - 24, cy - 24, cx + 24, cy + 24, fill="#F2C66D", outline="")
+        self.c.create_oval(cx - 19, cy - 19, cx + 19, cy + 19,
+                           outline="#BD8D35", width=1)
+        self.t(cx, cy, "₱", 30, True, INK)
+        for start in (155, 335):
+            points = []
+            for step in range(26):
+                angle = math.radians(start - step * 5)
+                points.extend((cx + 35 * math.cos(angle), cy - 35 * math.sin(angle)))
+            self.c.create_line(points, fill=WHITE, width=2, smooth=True,
+                               capstyle="round", arrow="last", arrowshape=(6, 7, 3))
+        # Fade the shadow outward, then draw the solid extra-bold lettering.
+        stroke = ((-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0),
+                  (-1, 1), (0, 1), (1, 1), (0, 0))
+        for offset_x, offset_y, colour in ((4, 6, "#F2F4F8"), (3, 4, "#E3E8F1"),
+                                           (2, 3, "#C2CDDF"), (0, 0, INK)):
+            for dx, dy in stroke:
+                self.t(text_left + offset_x + dx, 237 + offset_y + dy,
+                       wordmark, wordmark_px, True, colour, "w")
+        self.t(text_left + wordmark_width / 2, 284, "COIN EXCHANGE", 15, True, GREY)
         self.edge("left", "Contact us", self.go("contact"), w=212)
         self.edge("right", "Start", self.go("exchange_type"), w=212)
 
@@ -1748,7 +1754,6 @@ def main(argv=None):
     HARDWARE_MODE = args.hardware
     DEMO_MODE = not args.hardware
     FULLSCREEN = not args.windowed
-    install_bundled_fonts()
     root = None
     try:
         root = tk.Tk()
