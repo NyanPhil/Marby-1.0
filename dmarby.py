@@ -86,6 +86,20 @@ PRESS_KEY = "#CBD6F2"      # keypad keys and light pills while pressed
 CEBUANO = {
 }
 
+# Supplied handset silhouette, antialiased and embedded for portable Tk loading.
+CONTACT_PHONE_PNG = (
+    "iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAYAAAByDd+UAAACUUlEQVR42q2Vv2sUURSFv5ndRCFWKlpaWgkSLAyS"
+    "2kYJEkGxFhECdv4PNiIGERvB2kItUlkoKmgnWkhQDJEUiqBCQIMku/NZeAeeLzu7G3cvDO/Nzn173v11DmqhorbV"
+    "K+or9av6Qz0X31qxjvwQgHvVJ263T+oetUwuNhbApQDYVLux34r1WpKBsQDOZQC1VQH+Wz0cFytHBSyBi4BAwb9W"
+    "xO+7gBsNPjs39UsSUS/rxDo3jgYq1C2g3edOVUT2HjgKbNZ3/Z8AS6A1KAmx7g9fR8loCaz3uXEVIAVwFdgYFbQE"
+    "VhsAje/fgTPAvXjvjhrhix6A9X4NmAUeRWTVqE1aAg+Tfd4oH4FlYHLUyNKxaKtvYyw6yTjUjHNqnHxaAh3gVp+h"
+    "XgSmEjIYOcJS3a2uJHSWD/3duOHEOLi0TtWZBk6t3xeGAK1VpWgqAVl97vcATWt7PgEteoDlANsIP3Uu1X3qWtY0"
+    "qXJU6qXkD1rZOhsC/jIylvoVKWB6aCZ0sZMRelrfm1F31MlYj6kbWTmW1OkUI09BLbIXkqapGtL7Rj0Z/gfU1UzE"
+    "u8n7onowjzAHXUhAuw2SVUex3KMMud9n9XRTt9WglxsOm9TUAXpaRZSq3/rNTA16Vv3ZMDJNGehlXbX7t3OarR1M"
+    "NB1qcSSIvRpCR3OZA1gpBzh2AvQ1MANcD8BWkPkw6mH4lsDtYSkpHd7j6tOGtFbJ083q/lid2AkP5nQ1rz7r0yy1"
+    "/VLvqFNqMaiGvawW4vrgLDAPnAAOhXauAx+A58AD4F2tNn8A9QSNVHJMW/MAAAAASUVORK5CYII="
+)
+
 FONT_NAME = "Plus Jakarta Sans"
 FONT_CANDIDATES = (FONT_NAME, "Inter", "Segoe UI", "SF Pro Text", "Noto Sans",
                    "DejaVu Sans", "Liberation Sans", "Helvetica", "Arial")
@@ -271,7 +285,8 @@ class Kiosk:
         root.bind("<Key>", self.on_key)
 
         self.img = {k: tk.PhotoImage(master=root, data=v, format="png")
-                    for k, v in {**CURRENCY_PICTURES, **IMAGES}.items()}
+                    for k, v in {**CURRENCY_PICTURES, **IMAGES,
+                                 "contact_phone": CONTACT_PHONE_PNG}.items()}
         self.shadow_img = {k: tk.PhotoImage(master=root, data=v, format="png")
                            for k, v in SHADOWS.items()}
         self.fade_img = {k: tk.PhotoImage(master=root, data=v, format="png")
@@ -624,25 +639,15 @@ class Kiosk:
         self.coin(20, 38, 32, 32)
         self.t(64, 32, "D' MARBY Coin Exchanger", 19, False, WHITE, "w")
 
-        # One compact brand panel; the greeting sits just above the logo.
-        self.rounded(116, 130, 692, 338, 28, "#112875")
-        self.rounded(112, 124, 688, 332, 28, WHITE)
-        self.t(W / 2, 168, self.tr("Welcome to"), 36, False, GREY)
-
-        # Keep the centred wordmark within the panel with any system font.
-        wordmark = "D’MARBY"
-        wordmark_px = 60
-        while self.measure(wordmark, wordmark_px, True) > 394 and wordmark_px > 36:
-            wordmark_px -= 1
-        # Fade the shadow outward, then draw the solid extra-bold lettering.
+        # Two large white lines directly on the blue background.
         stroke = ((-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0),
                   (-1, 1), (0, 1), (1, 1), (0, 0))
-        for offset_x, offset_y, colour in ((4, 6, "#F2F4F8"), (3, 4, "#E3E8F1"),
-                                           (2, 3, "#C2CDDF"), (0, 0, INK)):
+        for text, y in ((self.tr("Welcome to"), 180), ("D’ MARBY", 282)):
+            px = 76
+            while self.measure(text, px, True) > W - 160 and px > 44:
+                px -= 1
             for dx, dy in stroke:
-                self.t(W / 2 + offset_x + dx, 237 + offset_y + dy,
-                       wordmark, wordmark_px, True, colour)
-        self.t(W / 2, 284, "COIN EXCHANGE", 15, True, GREY)
+                self.t(W / 2 + dx, y + dy, text, px, True, WHITE)
         self.edge("left", "Contact us", self.go("contact"), w=212)
         self.edge("right", "Start", self.go("incident" if self.fault else "exchange_type"), w=212)
 
@@ -655,12 +660,10 @@ class Kiosk:
         x1, y1, x2, y2 = 185, 70, 615, 340
         self.card(x1, y1, x2, y2)
         cx = W / 2
-        # phone icon: handset drawn in a blue circle
+        # Solid handset from the supplied reference, centred in the blue badge.
         self.oval(cx - 32, y1 + 24, cx + 32, y1 + 88, fill=TINT, outline="")
         self.oval(cx - 22, y1 + 34, cx + 22, y1 + 78, fill=BLUE, outline="")
-        self.c.create_line(cx - 9, y1 + 46, cx - 9, y1 + 52, cx - 2, y1 + 62, cx + 6, y1 + 68,
-                           cx + 11, y1 + 68, fill=WHITE, width=5, capstyle="round", joinstyle="round",
-                           smooth=True)
+        self.picture("contact_phone", cx, y1 + 56)
         self.t(cx, y1 + 120, self.tr("Need help?"), 30, True, INK)
         self.t(cx, y1 + 156, self.tr("Call or text the D' MARBY team at"), 16, True, GREY)
         self.t(cx, y1 + 194, CONTACT_NUMBER, 30, True, BLUE)
