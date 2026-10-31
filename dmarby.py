@@ -245,9 +245,6 @@ def ref_number():
 # ----------------------------------------------------------------------
 
 class Kiosk:
-    MONEY_IDLE_EXEMPT = ("welcome", "dispensing", "done", "gc_cashing", "gc_success",
-                         "incident", "out_of_coins", "admin")
-
     def __init__(self, root):
         self.root = root
         self.closed = False
@@ -610,6 +607,8 @@ class Kiosk:
             self.incident_dismissed = False
         if screen != self.screen:
             self.screen_since = time.monotonic()
+            if screen == "insert":
+                self.last_input = self.screen_since
         self.screen = screen
         self.overlay = overlay
         self.redraw()
@@ -1020,17 +1019,22 @@ class Kiosk:
     # Insert money (all flows)
     # ------------------------------------------------------------------
 
+    def waiting_for_money(self):
+        """True only while a valid deposit screen still needs payment."""
+        return (self.screen == "insert" and not self.fault
+                and self.flow in ("bill", "break", "combine", "gcash")
+                and self.credit < self.target
+                and (self.flow != "bill" or self.credit == 0))
+
     def accepts(self):
         """Which kinds of money the insert screen accepts right now."""
-        if self.screen != "insert" or self.overlay:
+        if not self.waiting_for_money() or self.overlay:
             return set()
         if self.flow == "bill":
-            return {"bill"} if self.credit == 0 else set()
+            return {"bill"}
         if self.flow in ("break", "combine"):
-            return {"coin"} if self.credit < self.target else set()
-        if self.flow == "gcash":
-            return {"bill", "coin"} if self.credit < self.target else set()
-        return set()
+            return {"coin"}
+        return {"bill", "coin"}  # GCash demo.
 
     def s_insert(self):
         gc = self.flow == "gcash"
@@ -1887,7 +1891,9 @@ class Kiosk:
             self.incident_info = self.fault
             self.show("incident")
         elif o and o["kind"] in ("timeout_empty", "timeout_money"):
-            if now >= o["deadline"]:
+            if not self.waiting_for_money():
+                self.show(self.screen)
+            elif now >= o["deadline"]:
                 if o["kind"] == "timeout_money":
                     ref = self.ensure_reference()
                     self.references.record(ref, "forfeit", {"amount": self.credit, "flow": self.flow})
@@ -1907,11 +1913,11 @@ class Kiosk:
                 self.show("welcome")
             elif self.screen in ("done", "gc_success"):
                 self.redraw()  # countdown text
-            elif self.credit and self.screen not in self.MONEY_IDLE_EXEMPT and idle >= IDLE_MONEY_S:
-                self.show(self.screen, {"kind": "timeout_money", "deadline": now + PROMPT_S})
-            elif (not self.credit and self.screen not in ("welcome", "admin", "out_of_coins")
-                  and self.screen not in self.MONEY_IDLE_EXEMPT and idle >= IDLE_EMPTY_S):
-                self.show(self.screen, {"kind": "timeout_empty", "deadline": now + PROMPT_S})
+            elif self.waiting_for_money():
+                limit = IDLE_MONEY_S if self.credit else IDLE_EMPTY_S
+                if idle >= limit:
+                    kind = "timeout_money" if self.credit else "timeout_empty"
+                    self.show(self.screen, {"kind": kind, "deadline": now + PROMPT_S})
         self.jobs["tick"] = self.root.after(1000 if not o else 250, self.tick)
 
     def close(self):

@@ -271,7 +271,8 @@ class KioskHardwareMixin:
         if self._hw_ready:
             if self.hardware.input_pending():
                 self.last_input = time.monotonic()
-            if (self.overlay and self.overlay.get("kind") == "timeout_money"
+            if (self.waiting_for_money() and self.overlay
+                    and self.overlay.get("kind") == "timeout_money"
                     and time.monotonic() >= self.overlay["deadline"]):
                 self._hardware_fault("The customer timed out with cash in the machine. Balance remains owed.")
         super().tick()
