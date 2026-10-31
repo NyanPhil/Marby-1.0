@@ -9,9 +9,6 @@ sensor. Bill pulses: 5=PHP 50, 10=PHP 100; coin pulses: 1/5/10/20=PHP 1/5/10/20.
 GCash is simulated in demo mode and unavailable for real cash until a real
 transfer integration is supplied. Hardware transactions never auto-forfeit
 accepted cash on timeout. Existing transaction logs are append-only.
-
-.venv\Scripts\Activate.ps1  
-python dmarby.py --demo --windowed
 """
 
 import json
@@ -1084,7 +1081,7 @@ class Kiosk:
             prev = {"bill": "build_mix", "break": "build_mix", "combine": "combine_choice",
                     "gcash": "gc_number"}[self.flow]
             self.back(self.go(prev))
-        done = self.credit >= self.target and not counting
+        done = (self.credit == self.target if gc else self.credit >= self.target) and not counting
         if gc:
             self.edge("right", "Cash in  →", self.start_cashing, done)
         else:
@@ -1144,12 +1141,12 @@ class Kiosk:
             self.show("insert")
             return False
         if self.flow == "gcash":
-            if self.credit + value > self.target:
-                self.notice = self.tr("That bill is more than what's left. It was returned.")
-                self.show("insert")
-                return False
+            remaining = max(0, self.target - self.credit)
             self.add_credit("bill", value)
-            self.show("insert")
+            if value > remaining:
+                self.incident("overpayment", self.credit)
+            else:
+                self.show("insert")
             return True
         # Bill to coins
         self.add_credit("bill", value)
@@ -1355,16 +1352,25 @@ class Kiosk:
     # ------------------------------------------------------------------
 
     def incident(self, kind, amount):
-        for job in ("drop", "check"):
+        for job in ("drop", "check", "cash"):
             if job in self.jobs:
                 self.root.after_cancel(self.jobs.pop(job))
         ref = self.ensure_reference() if self.credit or self.inserted else ref_number()
+        details = {}
+        if kind == "overpayment":
+            bill = self.inserted[-1][1]
+            details = dict(bill=bill, remaining=max(0, self.target - (self.credit - bill)),
+                           excess=max(0, self.credit - self.target),
+                           target=self.target, total_received=self.credit)
         if ref == self.transaction_ref:
             self.references.record(ref, "incident", {"type": kind, "owed": amount,
-                                                     "flow": self.flow, "inserted": self.inserted})
-        self.log("incident", type=kind, owed=amount, flow=self.flow, inserted=self.inserted, ref=ref)
+                                                     "flow": self.flow, "inserted": self.inserted,
+                                                     **details})
+        self.log("incident", type=kind, owed=amount, flow=self.flow, inserted=self.inserted,
+                 ref=ref, **details)
         self.incident_info = dict(kind=kind, amount=amount, ref=ref,
                                   bill=next((v for k, v in self.inserted if k == "bill"), None))
+        self.incident_info.update(details)
         if kind == "jam":
             self.fault = self.incident_info
         self.show("incident", None)
@@ -1374,15 +1380,24 @@ class Kiosk:
         x1, y1, x2, y2 = 185, 50, 615, 346
         self.card(x1, y1, x2, y2)
         cx = W / 2
-        if info["kind"] == "cant_change" and info["bill"]:
+        sub_colour = RED
+        if info["kind"] in ("cant_change", "overpayment") and info["bill"]:
             self.note(info["bill"], cx, y1 + 48, 96)
             bx, by = cx + 46, y1 + 26
-            self.oval(bx - 14, by - 14, bx + 14, by + 14, fill=RED, outline=WHITE, width=3)
+            self.oval(bx - 14, by - 14, bx + 14, by + 14,
+                      fill=AMBER if info["kind"] == "overpayment" else RED, outline=WHITE, width=3)
             self.c.create_line(bx, by - 6, bx, by + 2, fill=WHITE, width=3.5, capstyle="round")
             self.oval(bx - 2, by + 5, bx + 2, by + 9, fill=WHITE, outline="")
-            head = self.tr("We can't change") + f" {money(info['amount'])} " + self.tr("right now")
-            sub = self.tr("Not enough coins in the machine.")
-            recorded = f"{self.tr('Your')} {money(info['amount'])} {self.tr('is recorded. Contact us at')}"
+            if info["kind"] == "overpayment":
+                head = self.tr("You gave too much money")
+                sub = (f"{self.tr('You needed only')} {money(info['remaining'])} "
+                       f"{self.tr('more, but inserted a')} {money(info['bill'])} {self.tr('bill.')}")
+                sub_colour = AMBER_TEXT
+                recorded = self.tr("We can't return bills. Contact us at")
+            else:
+                head = self.tr("We can't change") + f" {money(info['amount'])} " + self.tr("right now")
+                sub = self.tr("Not enough coins in the machine.")
+                recorded = f"{self.tr('Your')} {money(info['amount'])} {self.tr('is recorded. Contact us at')}"
         elif info["kind"] == "hardware":
             self.alert(cx, y1 + 48, 22, RED, "#FEE2E2")
             head = self.tr("Service required")
@@ -1395,16 +1410,19 @@ class Kiosk:
             sub = f"{self.tr('We still owe you')} {money(info['amount'])}."
             recorded = self.tr("This is recorded. Contact us at")
         self.t(cx, y1 + 108, head, 24, True, INK)
-        self.t(cx, y1 + 138, sub, 15, True, RED)
+        sub_px = 15
+        while self.measure(sub, sub_px, True) > x2 - x1 - 28 and sub_px > 12:
+            sub_px -= 1
+        self.t(cx, y1 + 138, sub, sub_px, True, sub_colour)
         self.c.create_line(x1 + 34, y1 + 162, x2 - 34, y1 + 162, fill=LIGHT, width=2)
         self.t(cx, y1 + 186, recorded, 15, True, GREY)
         self.t(cx, y1 + 216, CONTACT_NUMBER, 24, True, BLUE)
         self.pill(cx - 128, y1 + 242, cx + 128, y1 + 272, TINT)
-        self.t(cx, y1 + 257, f"Ref  {info['ref']}", 15, True, INK)
+        self.t(cx, y1 + 257, f"Ref {info['ref']}", 15, True, INK)
         self.t(140 if info["kind"] not in ("jam", "hardware") else W / 2, 418, self.tr("Take a photo of this screen."),
                16, True, SOFT, "center")
         if info["kind"] not in ("jam", "hardware"):
-            self.edge("right", "Done  →", self.go("welcome"), w=200)
+            self.edge("right", "Exit  →", self.go("welcome"), w=200)
 
     # ------------------------------------------------------------------
     # GCash
@@ -1540,7 +1558,7 @@ class Kiosk:
         self.redraw()
 
     def gc_number_next(self):
-        if self.gc_reentry and self.credit >= self.target:
+        if self.gc_reentry and self.credit == self.target:
             self.start_cashing()
             return
         self.target = self.gc_amount + self.gc_fee
@@ -1556,6 +1574,10 @@ class Kiosk:
         return f"{n[:4]} {n[4:7]} {n[7:]}"
 
     def start_cashing(self):
+        if (self.fault or self.flow != "gcash" or self.overlay
+                or self.screen not in ("insert", "gc_error", "gc_number")
+                or self.target <= 0 or self.credit != self.target):
+            return False
         self.show("gc_cashing")
         bad = self.demo["bad_number"]
         self.demo["bad_number"] = False
@@ -1563,8 +1585,9 @@ class Kiosk:
 
     def cashing_result(self, ok):
         self.jobs.pop("cash", None)
-        if self.screen != "gc_cashing":
-            return
+        if (self.screen != "gc_cashing" or self.flow != "gcash" or self.fault
+                or self.target <= 0 or self.credit != self.target):
+            return False
         if ok:
             self.gcash_balance -= self.gc_amount
             self.gc_ref = self.ensure_reference()
