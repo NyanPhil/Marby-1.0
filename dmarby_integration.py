@@ -66,9 +66,12 @@ class KioskHardwareMixin:
             if pending and screen not in ("insert", "incident", "admin"):
                 self.last_input = time.monotonic()
                 return
-            if screen == "welcome" and self.hardware.storage.unresolved:
+            unresolved = self.hardware.storage.unresolved
+            if screen == "welcome" and unresolved and not self.incident_dismissed:
                 self._hardware_fault("An unfinished deposit cannot be cleared by returning home.")
                 return
+            if unresolved and self.incident_dismissed and screen not in ("welcome", "incident", "admin"):
+                screen, overlay = "incident", None
         super().show(screen, overlay)
         if self._hw_ready:
             self._sync_acceptance()
@@ -113,6 +116,7 @@ class KioskHardwareMixin:
             return
         self.credit = self.hardware.storage.state["credit"]
         self.transaction_ref = self.hardware.storage.state["reference"]
+        self.stock = self._stock_from_backend()
         self.inserted = [(item["source"], item["value"])
                          for item in self.hardware.storage.state["received"]]
         self.last_input = time.monotonic()
@@ -122,6 +126,9 @@ class KioskHardwareMixin:
             self._hardware_fault("Cash was accepted outside its deposit screen.")
             return
         self.notice = None
+        if source == "bill" and not self.hardware.storage.can_make_exact(value):
+            self.incident("wrong_bill_unpayable" if value != self.target else "cant_change", value)
+            return
         if source == "bill" and value != self.target:
             self.wrong = (self.target, value)
             self.show("wrong_bill")
@@ -129,6 +136,12 @@ class KioskHardwareMixin:
             self._hardware_fault("Accepted coins exceed the selected total; staff must settle the balance.")
         else:
             self.show("insert")
+
+    def reroute_bill(self):
+        if self.fault:
+            return False
+        self.stock = self._stock_from_backend()
+        return super().reroute_bill()
 
     def _hardware_tick(self):
         if self.closed:
@@ -212,7 +225,7 @@ class KioskHardwareMixin:
         except Exception as exc:
             self._hardware_fault(str(exc))
 
-    def _hardware_fault(self, detail):
+    def _hardware_fault(self, detail, kind="hardware", bill=None, picked_bill=None):
         self.hardware.stopping.set()
         try:
             self.hardware.set_acceptance(None)
@@ -220,7 +233,14 @@ class KioskHardwareMixin:
             pass
         if getattr(self, "fault", None):
             return
+        context = {}
+        if bill is not None:
+            context["bill"] = bill
+        if picked_bill is not None:
+            context["picked_bill"] = picked_bill
         try:
+            if context:
+                self.hardware.storage.state["incident"] = dict(type=kind, **context)
             self.hardware.storage.fault(detail)
         except Exception as exc:
             detail = f"{detail}; journal write failed: {exc}"
@@ -229,14 +249,19 @@ class KioskHardwareMixin:
                 self.root.after_cancel(self.jobs.pop(name))
         from uuid import uuid4
         reference = self.hardware.storage.state.get("reference") or self.transaction_ref
-        info = {"kind": "hardware", "amount": self._owed(), "ref": reference or "HW-" + uuid4().hex[:10].upper(),
-                "bill": None, "detail": str(detail)}
+        info = {"kind": kind, "amount": self._owed(), "ref": reference or "HW-" + uuid4().hex[:10].upper(),
+                "bill": bill, "detail": str(detail), **context}
         self.fault = self.incident_info = info
         self.log("hardware_fault", fault_kind=info["kind"], amount=info["amount"],
-                 ref=info["ref"], detail=info["detail"])
+                 ref=info["ref"], detail=info["detail"], **context)
         self.show("incident", None)
 
     def incident(self, kind, amount):
+        if kind in ("wrong_bill_unpayable", "cant_change"):
+            bill = next((value for source, value in reversed(self.inserted) if source == "bill"), None)
+            self._hardware_fault(f"Cannot give exact coin change for accepted PHP {amount} bill.",
+                                 kind=kind, bill=bill, picked_bill=self.target)
+            return
         self._hardware_fault(f"{kind}: recorded balance PHP {amount}")
 
     def payout_fault(self):

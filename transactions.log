@@ -6,3 +6,6 @@
 {"time": "2026-10-31 21:53:08", "mode": "demo", "kind": "forfeit", "amount": 7, "flow": "gcash", "inserted": [["coin", 5], ["coin", 1], ["coin", 1]], "ref": "000006"}
 {"time": "2026-10-31 22:22:52", "mode": "demo", "kind": "incident", "type": "overpayment", "owed": 50, "flow": "gcash", "inserted": [["bill", 50]], "ref": "000007", "bill": 50, "remaining": 6, "excess": 44, "target": 6, "total_received": 50}
 {"time": "2026-10-31 22:25:30", "mode": "demo", "kind": "incident", "type": "overpayment", "owed": 50, "flow": "gcash", "inserted": [["bill", 50]], "ref": "000008", "bill": 50, "remaining": 9, "excess": 41, "target": 9, "total_received": 50}
+{"time": "2026-10-31 22:28:39", "mode": "demo", "kind": "forfeit", "amount": 100, "flow": "bill", "inserted": [["bill", 100]], "ref": "000009"}
+{"time": "2026-10-31 22:56:42", "mode": "demo", "kind": "exchange", "flow": "bill", "amount": 100, "plan": {"20": 4, "10": 2}, "ref": "000010"}
+{"time": "2026-10-31 22:56:57", "mode": "demo", "kind": "incident", "type": "overpayment", "owed": 50, "flow": "gcash", "inserted": [["bill", 50]], "ref": "000011", "bill": 50, "remaining": 9, "excess": 41, "target": 9, "total_received": 50}

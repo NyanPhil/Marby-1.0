@@ -242,6 +242,7 @@ class Kiosk:
         self.gcash_balance = GCASH_START_BALANCE
         self.demo = {"reject": False, "jam": False, "bad_number": False}
         self.fault = None
+        self.incident_dismissed = False
         self.taps = []
         self.actions = []
         self.overlay = None
@@ -590,6 +591,8 @@ class Kiosk:
     def show(self, screen, overlay=None):
         if self.closed:
             return
+        if screen != "welcome":
+            self.incident_dismissed = False
         if screen != self.screen:
             self.screen_since = time.monotonic()
         self.screen = screen
@@ -641,7 +644,7 @@ class Kiosk:
                        wordmark, wordmark_px, True, colour)
         self.t(W / 2, 284, "COIN EXCHANGE", 15, True, GREY)
         self.edge("left", "Contact us", self.go("contact"), w=212)
-        self.edge("right", "Start", self.go("exchange_type"), w=212)
+        self.edge("right", "Start", self.go("incident" if self.fault else "exchange_type"), w=212)
 
     def pick_lang(self, lang):
         """Kept for the Cebuano option later; the welcome screen now just says Start."""
@@ -1150,13 +1153,13 @@ class Kiosk:
             return True
         # Bill to coins
         self.add_credit("bill", value)
-        if value == self.target:
+        if not payable(value, self.stock):
+            self.incident("wrong_bill_unpayable" if value != self.target else "cant_change", value)
+        elif value == self.target:
             self.show("insert")
-        elif payable(value, self.stock):
+        else:
             self.wrong = (self.target, value)
             self.show("wrong_bill")
-        else:
-            self.incident("cant_change", value)
         return True
 
     def coin_inserted(self, value, ok=True):
@@ -1208,6 +1211,9 @@ class Kiosk:
         self.edge("right", "Choose coins  →", self.reroute_bill, w=280)
 
     def reroute_bill(self):
+        if not payable(self.credit, self.stock):
+            self.incident("wrong_bill_unpayable", self.credit)
+            return False
         self.target = self.credit
         self.mix = Counter()
         self.rerouted = True
@@ -1362,6 +1368,8 @@ class Kiosk:
             details = dict(bill=bill, remaining=max(0, self.target - (self.credit - bill)),
                            excess=max(0, self.credit - self.target),
                            target=self.target, total_received=self.credit)
+        elif kind == "wrong_bill_unpayable":
+            details = dict(bill=self.inserted[-1][1], picked_bill=self.target)
         if ref == self.transaction_ref:
             self.references.record(ref, "incident", {"type": kind, "owed": amount,
                                                      "flow": self.flow, "inserted": self.inserted,
@@ -1381,14 +1389,20 @@ class Kiosk:
         self.card(x1, y1, x2, y2)
         cx = W / 2
         sub_colour = RED
-        if info["kind"] in ("cant_change", "overpayment") and info["bill"]:
+        if info["kind"] in ("cant_change", "overpayment", "wrong_bill_unpayable") and info["bill"]:
             self.note(info["bill"], cx, y1 + 48, 96)
             bx, by = cx + 46, y1 + 26
             self.oval(bx - 14, by - 14, bx + 14, by + 14,
-                      fill=AMBER if info["kind"] == "overpayment" else RED, outline=WHITE, width=3)
+                      fill=AMBER if info["kind"] in ("overpayment", "wrong_bill_unpayable") else RED,
+                      outline=WHITE, width=3)
             self.c.create_line(bx, by - 6, bx, by + 2, fill=WHITE, width=3.5, capstyle="round")
             self.oval(bx - 2, by + 5, bx + 2, by + 9, fill=WHITE, outline="")
-            if info["kind"] == "overpayment":
+            if info["kind"] == "wrong_bill_unpayable":
+                head = f"{self.tr('You inserted a')} {money(info['bill'])} {self.tr('bill')}"
+                sub = f"{self.tr('Not the')} {money(info['picked_bill'])} {self.tr('you picked.')}"
+                sub_colour = AMBER_TEXT
+                recorded = self.tr("The machine can't return this bill. Contact us at")
+            elif info["kind"] == "overpayment":
                 head = self.tr("You gave too much money")
                 sub = (f"{self.tr('You needed only')} {money(info['remaining'])} "
                        f"{self.tr('more, but inserted a')} {money(info['bill'])} {self.tr('bill.')}")
@@ -1422,7 +1436,13 @@ class Kiosk:
         self.t(140 if info["kind"] not in ("jam", "hardware") else W / 2, 418, self.tr("Take a photo of this screen."),
                16, True, SOFT, "center")
         if info["kind"] not in ("jam", "hardware"):
-            self.edge("right", "Exit  →", self.go("welcome"), w=200)
+            self.edge("right", "Exit  →" if info["kind"] == "wrong_bill_unpayable" else "Done  →",
+                      self.exit_incident, w=200)
+
+    def exit_incident(self):
+        """Dismiss the receipt; hardware debt and the acceptance lock remain."""
+        self.incident_dismissed = True
+        self.show("welcome")
 
     # ------------------------------------------------------------------
     # GCash
@@ -1859,7 +1879,8 @@ class Kiosk:
         idle = now - self.last_input
         on_screen = now - self.screen_since
         o = self.overlay
-        if self.fault and self.screen not in ("incident", "admin"):
+        if (self.fault and self.screen not in ("incident", "admin")
+                and not (self.incident_dismissed and self.screen == "welcome")):
             self.incident_info = self.fault
             self.show("incident")
         elif o and o["kind"] in ("timeout_empty", "timeout_money"):

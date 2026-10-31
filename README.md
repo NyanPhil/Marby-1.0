@@ -123,7 +123,13 @@ Hardware startup is intentionally blocked by the supplied false verification fla
 4. The customer confirms the payout. A worker performs one servo cycle at a time while the touchscreen remains responsive.
 5. Each confirmed coin updates the journal and inventory once. The collect screen appears after the entire payout is committed.
 
-A different supported bill can be rerouted to a rebuilt mix. An accepted coin that exceeds the selected amount is recorded as a service incident; the screen never falsely claims it was physically returned.
+A different supported bill can be rerouted to a rebuilt mix when the recorded inventory can pay its full value. The hardware handler rechecks the actual bill after acceptance, and inventory is checked again when the customer taps “Choose coins”. If the customer selected PHP 50 but the accepted PHP 100 cannot be paid, the screen shows “You inserted a PHP 100 bill”, “Not the PHP 50 you picked”, the staff contact and the existing transaction reference. No coin payout starts. The full accepted amount, actual bill and selected bill are saved in the fault journal and transaction history.
+
+The initial hardware check still requires inventory to cover both accepted bill values before intake is enabled. The post-acceptance check handles stock changes or an unexpected accepted bill. On the unpayable-bill screen, **Exit** returns to the welcome screen while preserving the outstanding transaction and keeping both acceptors disabled. Starting again returns to the incident; staff must settle the customer, reconcile the journal and restart before hardware cash intake resumes. If the previous transaction-number update is installed, this fallback fix requires replacing `dmarby.py` and `dmarby_integration.py` together.
+
+An accepted coin that exceeds the selected amount is recorded as a hardware service incident; the screen never falsely claims it was physically returned.
+
+For a GCash bill overpayment, the UI records the accepted bill and all earlier deposits, stops cash-in and shows the contact incident screen. It displays the amount still needed before that bill, the actual bill denomination, the staff contact and the transaction's existing sequential reference. The machine cannot dispense bills, so the screen does not claim an accepted bill was returned. The full received amount remains recorded for staff settlement; the extra amount is also recorded separately. An exact payment can proceed to cash-in, and a bill rejected by the acceptor before acceptance does not create an overpayment incident.
 
 ## Recovery
 
