@@ -1,0 +1,42 @@
+cd ~/Marby
+
+.venv/bin/python -u - <<'PY'
+from gpiozero import DigitalInputDevice
+from time import monotonic, sleep
+from threading import Lock
+
+FRAME_GAP = 2.0  # Report after 2 seconds without another pulse
+
+coin = DigitalInputDevice(17, pull_up=True)
+
+lock = Lock()
+count = 0
+last_pulse = 0.0
+
+def pulse_detected():
+    global count, last_pulse
+    with lock:
+        count += 1
+        last_pulse = monotonic()
+
+coin.when_activated = pulse_detected
+
+print("Monitoring coin pulses on GPIO17")
+print("Insert one coin at a time.")
+print("Press Ctrl+C to exit.")
+
+try:
+    while True:
+        sleep(0.05)
+
+        with lock:
+            if count > 0 and monotonic() - last_pulse >= FRAME_GAP:
+                print(f"Pulse count: {count}", flush=True)
+                count = 0
+
+except KeyboardInterrupt:
+    print("\nStopped.")
+
+finally:
+    coin.close()
+PY

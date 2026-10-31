@@ -6,9 +6,11 @@ Run: python -m unittest -v test_dmarby_integration.py
 import copy
 import io
 import json
+import struct
 import tempfile
 import types
 import unittest
+import zlib
 from collections import Counter
 from concurrent.futures import Future
 from contextlib import redirect_stderr
@@ -175,6 +177,112 @@ class FontPortabilityTests(unittest.TestCase):
             finally:
                 app.close()
         self.assertEqual(errors.getvalue(), "")
+
+
+class SmoothCurveTests(unittest.TestCase):
+    BLUE = (29, 63, 191)
+
+    def pixels(self, fill=None, outline=None, stroke=0, start=None, extent=None, corner=None):
+        data = dmarby.smooth_shape_png(24, 24, 12, 12, 9, 9,
+                                     fill, outline, stroke, start, extent, corner)
+        self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
+        compressed = bytearray()
+        offset = 8
+        while offset < len(data):
+            size = struct.unpack(">I", data[offset:offset + 4])[0]
+            kind = data[offset + 4:offset + 8]
+            payload = data[offset + 8:offset + 8 + size]
+            checksum = struct.unpack(">I", data[offset + 8 + size:offset + 12 + size])[0]
+            self.assertEqual(checksum, zlib.crc32(kind + payload) & 0xFFFFFFFF)
+            if kind == b"IDAT":
+                compressed.extend(payload)
+            offset += size + 12
+        rows = zlib.decompress(compressed)
+        pixels = b"".join(rows[y * 97 + 1:(y + 1) * 97] for y in range(24))
+        return pixels, lambda x, y: tuple(pixels[(y * 24 + x) * 4:(y * 24 + x + 1) * 4])
+
+    def test_circle_has_transparent_corners_and_smooth_coloured_edges(self):
+        pixels, at = self.pixels(fill=self.BLUE)
+        self.assertEqual(at(12, 12), (*self.BLUE, 255))
+        self.assertEqual(at(0, 0), (0, 0, 0, 0))
+        self.assertTrue(any(0 < alpha < 255 for alpha in pixels[3::4]))
+        for offset in range(0, len(pixels), 4):
+            if pixels[offset + 3]:
+                self.assertEqual(tuple(pixels[offset:offset + 3]), self.BLUE)
+
+    def test_outline_keeps_ring_hollow_and_supports_a_filled_centre(self):
+        pixels, at = self.pixels(outline=self.BLUE, stroke=3)
+        self.assertEqual(at(12, 12)[3], 0)
+        self.assertGreater(at(12, 3)[3], 240)
+        self.assertTrue(any(0 < alpha < 255 for alpha in pixels[3::4]))
+        _, filled = self.pixels(fill=self.BLUE, outline=(255, 255, 255), stroke=4)
+        self.assertEqual(filled(12, 12), (*self.BLUE, 255))
+        self.assertEqual(filled(12, 3), (255, 255, 255, 255))
+
+    def test_arc_preserves_clockwise_and_counterclockwise_progress(self):
+        _, clockwise = self.pixels(outline=self.BLUE, stroke=3, start=90, extent=-90)
+        _, counterclockwise = self.pixels(outline=self.BLUE, stroke=3, start=90, extent=90)
+        self.assertGreater(clockwise(18, 6)[3], 240)
+        self.assertEqual(clockwise(5, 5)[3], 0)
+        self.assertGreater(counterclockwise(5, 5)[3], 240)
+        self.assertEqual(counterclockwise(18, 6)[3], 0)
+        self.assertEqual(clockwise(12, 12)[3], 0)
+        self.assertEqual(clockwise(12, 21)[3], 0)
+
+    def test_empty_arc_is_transparent(self):
+        pixels, _ = self.pixels(outline=self.BLUE, stroke=3, start=90, extent=0)
+        self.assertFalse(any(pixels[3::4]))
+
+    def test_rounded_box_keeps_its_middle_solid_and_corners_transparent(self):
+        pixels, at = self.pixels(fill=self.BLUE, corner=5)
+        self.assertEqual(at(12, 12), (*self.BLUE, 255))
+        self.assertEqual(at(12, 3), (*self.BLUE, 255))
+        self.assertEqual(at(3, 3)[3], 0)
+        self.assertTrue(any(0 < alpha < 255 for alpha in pixels[3::4]))
+
+    def app(self):
+        self.addCleanup(patch.stopall)
+        patch.object(dmarby, "FULLSCREEN", False).start()
+        patch.object(dmarby.tk, "PhotoImage", lambda **kwargs: object()).start()
+        patch.object(dmarby.tk, "Canvas", Canvas).start()
+        patch.object(dmarby.tkfont, "families", return_value=("DejaVu Sans",)).start()
+        patch.object(dmarby.tkfont, "Font", Font).start()
+        app = dmarby.Kiosk(Root())
+        self.addCleanup(app.close)
+        return app
+
+    def test_same_circle_reuses_image_at_different_locations(self):
+        app = self.app()
+        previous_count = len(app.shape_cache)
+        first = app.oval(0, 0, 36, 36, fill=dmarby.BLUE)
+        second = app.oval(100, 50, 136, 86, fill=dmarby.BLUE)
+        self.assertIs(app.shape_refs[first], app.shape_refs[second])
+        self.assertEqual(len(app.shape_cache), previous_count + 1)
+
+    def test_cache_eviction_keeps_visible_shapes_alive_until_redraw(self):
+        app = self.app()
+        with patch.object(dmarby, "SHAPE_CACHE_LIMIT", 4):
+            first = app.oval(0, 0, 8, 8, fill=dmarby.BLUE)
+            first_photo = app.shape_refs[first]
+            for size in range(10, 20):
+                app.oval(0, 0, size, size, fill=dmarby.BLUE)
+            self.assertLessEqual(len(app.shape_cache), 4)
+            self.assertNotIn(first_photo, app.shape_cache.values())
+            self.assertIs(app.shape_refs[first], first_photo)
+            app.redraw()
+            self.assertNotIn(first, app.shape_refs)
+            self.assertEqual(app.arc_specs, {})
+
+    def test_spinner_updates_image_without_replacing_canvas_item(self):
+        app = self.app()
+        app.show("gc_cashing")
+        spinner = app.spinner
+        with patch.object(app.c, "itemconfigure") as update:
+            app.spin()
+        self.assertEqual(app.spinner, spinner)
+        self.assertEqual(update.call_args.args, (spinner,))
+        self.assertEqual(set(update.call_args.kwargs), {"image"})
+        self.assertIs(app.shape_refs[spinner], update.call_args.kwargs["image"])
 
 
 class IntegrationTests(unittest.TestCase):
