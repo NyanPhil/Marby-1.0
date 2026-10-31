@@ -14,10 +14,13 @@ accepted cash on timeout. Existing transaction logs are append-only.
 import json
 import math
 import os
+import struct
 import sys
 import time
 import tkinter as tk
-from collections import Counter
+import zlib
+from collections import Counter, OrderedDict
+from functools import lru_cache
 from tkinter import font as tkfont
 from tkinter import messagebox
 
@@ -94,6 +97,87 @@ def choose_font_family(root):
         if candidate.casefold() in available:
             return available[candidate.casefold()]
     return tkfont.nametofont("TkDefaultFont", root=root).actual("family")
+
+
+# Tk's oval and arc items have hard pixel edges. These small transparent PNGs
+# add fractional edge coverage without Pillow or any other runtime dependency.
+SHAPE_CACHE_LIMIT = 128
+
+
+@lru_cache(maxsize=256)
+def smooth_shape_png(w, h, cx, cy, rx, ry, fill, outline, stroke, start, extent, corner=None):
+    """Render an antialiased oval, rounded box or round-ended arc to RGBA PNG."""
+    solid = bytes((*fill, 255)) if fill is not None and corner is not None else bytes(4)
+    pixels = bytearray(solid * (w * h))
+    circular = abs(rx - ry) < 0.00001
+    half_stroke = stroke / 2 if outline is not None else 0
+    is_arc = start is not None
+    if is_arc:
+        sweep = min(360, abs(extent))
+        a0, a1 = math.radians(start), math.radians(start + extent)
+        ends = ((rx * math.cos(a0), -ry * math.sin(a0)),
+                (rx * math.cos(a1), -ry * math.sin(a1)))
+
+    for y in range(h):
+        dy = y + 0.5 - cy
+        for x in range(w):
+            dx = x + 0.5 - cx
+            if corner is not None:
+                qx, qy = abs(dx) - (rx - corner), abs(dy) - (ry - corner)
+                if fill is not None and ((qx <= 0 and abs(dy) < ry - half_stroke - 0.5) or
+                                          (qy <= 0 and abs(dx) < rx - half_stroke - 0.5)):
+                    continue  # The flat interior was filled in one byte operation.
+                edge = math.hypot(max(qx, 0), max(qy, 0)) + min(max(qx, qy), 0) - corner
+            elif circular:
+                edge = math.hypot(dx, dy) - rx
+            else:
+                # Distance along the ellipse's local normal; circles use the
+                # exact faster branch above (all current UI rings are circles).
+                q = math.hypot(dx / rx, dy / ry)
+                gradient = math.hypot(dx / (rx * rx), dy / (ry * ry))
+                edge = (q - 1) * q / gradient if gradient else -min(rx, ry)
+
+            if is_arc:
+                if sweep == 0 or outline is None or stroke <= 0:
+                    continue
+                if abs(edge) > half_stroke + 0.5:
+                    continue
+                angle = math.degrees(math.atan2(-dy / ry, dx / rx))
+                progress = (angle - start) % 360 if extent > 0 else (start - angle) % 360
+                if progress <= sweep:
+                    curve_distance = abs(edge)
+                else:
+                    curve_distance = min(math.hypot(dx - ex, dy - ey) for ex, ey in ends)
+                alpha = max(0.0, min(1.0, half_stroke + 0.5 - curve_distance))
+                colour = outline
+            else:
+                outside = max(0.0, min(1.0, half_stroke + 0.5 - edge))
+                inside = max(0.0, min(1.0, 0.5 - half_stroke - edge))
+                border = outside - inside if outline is not None else 0
+                body = inside if fill is not None else 0
+                alpha = border + body
+                if alpha <= 0:
+                    if corner is not None and fill is not None:
+                        index = (y * w + x) * 4
+                        pixels[index:index + 4] = bytes(4)
+                    continue
+                if border and body:
+                    colour = tuple(round((outline[i] * border + fill[i] * body) / alpha)
+                                   for i in range(3))
+                else:
+                    colour = outline if border else fill
+            if alpha > 0:
+                index = (y * w + x) * 4
+                pixels[index:index + 4] = bytes((*colour, round(alpha * 255)))
+
+    def chunk(kind, data):
+        return (struct.pack(">I", len(data)) + kind + data +
+                struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
+
+    rows = b"".join(b"\0" + pixels[y * w * 4:(y + 1) * w * 4] for y in range(h))
+    return (b"\x89PNG\r\n\x1a\n" +
+            chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)) +
+            chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
 
 
 def money(v):
@@ -189,6 +273,9 @@ class Kiosk:
         self.fade_img = {k: tk.PhotoImage(master=root, data=v, format="png")
                          for k, v in FADES.items()}
         self.fonts = {}
+        self.shape_cache = OrderedDict()
+        self.shape_refs = {}
+        self.arc_specs = {}
 
         self.c = tk.Canvas(root, width=W, height=H, highlightthickness=0, bd=0, bg="#0A1A5C")
         self.c.place(relx=0.5, rely=0.5, anchor="center")
@@ -257,24 +344,67 @@ class Kiosk:
     def measure(self, s, px, bold):
         return self.font(px, bold).measure(s)
 
+    def shape_photo(self, x1, y1, x2, y2, fill="", outline="", width=1,
+                    start=None, extent=None, corner=None):
+        """Cache rasterized curves, including their subpixel positioning."""
+        def rgb(colour):
+            if not colour:
+                return None
+            if colour.startswith("#") and len(colour) == 7:
+                return tuple(int(colour[i:i + 2], 16) for i in (1, 3, 5))
+            return tuple(round(channel / 257) for channel in self.root.winfo_rgb(colour))
+
+        fill_rgb, outline_rgb = rgb(fill), rgb(outline)
+        stroke = float(width) if outline_rgb is not None else 0
+        pad = math.ceil(stroke / 2) + 1
+        left, top = math.floor(x1 - pad), math.floor(y1 - pad)
+        right, bottom = math.ceil(x2 + pad), math.ceil(y2 + pad)
+        key = (right - left, bottom - top, (x1 + x2) / 2 - left,
+               (y1 + y2) / 2 - top, (x2 - x1) / 2, (y2 - y1) / 2,
+               fill_rgb, outline_rgb, stroke,
+               round(start % 360, 3) if start is not None else None,
+               round(extent, 3) if extent is not None else None, corner)
+        photo = self.shape_cache.get(key)
+        if photo is None:
+            photo = tk.PhotoImage(master=self.root, data=smooth_shape_png(*key), format="png")
+            self.shape_cache[key] = photo
+            if len(self.shape_cache) > SHAPE_CACHE_LIMIT:
+                self.shape_cache.popitem(last=False)
+        else:
+            self.shape_cache.move_to_end(key)
+        return photo, left, top
+
+    def oval(self, x1, y1, x2, y2, fill="", outline="", width=1):
+        photo, left, top = self.shape_photo(x1, y1, x2, y2, fill, outline, width)
+        item = self.c.create_image(left, top, image=photo, anchor="nw")
+        self.shape_refs[item] = photo
+        return item
+
+    def arc(self, x1, y1, x2, y2, start, extent, style="arc", outline=BLUE, width=1):
+        photo, left, top = self.shape_photo(x1, y1, x2, y2, outline=outline,
+                                           width=width, start=start, extent=extent)
+        item = self.c.create_image(left, top, image=photo, anchor="nw")
+        self.shape_refs[item] = photo
+        self.arc_specs[item] = (x1, y1, x2, y2, outline, width, extent)
+        return item
+
+    def arc_start(self, item, start):
+        x1, y1, x2, y2, outline, width, extent = self.arc_specs[item]
+        photo, _, _ = self.shape_photo(x1, y1, x2, y2, outline=outline,
+                                       width=width, start=start, extent=extent)
+        self.c.itemconfigure(item, image=photo)
+        self.shape_refs[item] = photo
+
     def rounded(self, x1, y1, x2, y2, r, fill, outline="", width=1):
         r = min(r, (x2 - x1) / 2, (y2 - y1) / 2)
-        pts = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2,
-               x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
-        return self.c.create_polygon(pts, smooth=True, splinesteps=24, fill=fill,
-                                     outline=outline, width=width)
+        photo, left, top = self.shape_photo(x1, y1, x2, y2, fill, outline, width, corner=r)
+        item = self.c.create_image(left, top, image=photo, anchor="nw")
+        self.shape_refs[item] = photo
+        return item
 
     def pill(self, x1, y1, x2, y2, fill, outline="", width=1):
         """Shape with true semicircular ends."""
-        r = (y2 - y1) / 2
-        r = min(r, (x2 - x1) / 2)
-        pts = []
-        for cx, cy, a0 in ((x2 - r, y1 + r, -90), (x2 - r, y2 - r, 0),
-                           (x1 + r, y2 - r, 90), (x1 + r, y1 + r, 180)):
-            for k in range(13):
-                a = math.radians(a0 + k * 7.5)
-                pts += [cx + r * math.cos(a), cy + r * math.sin(a)]
-        return self.c.create_polygon(pts, fill=fill, outline=outline, width=width)
+        return self.rounded(x1, y1, x2, y2, (y2 - y1) / 2, fill, outline, width)
 
     def card(self, x1, y1, x2, y2, r=24, enabled=True, kind="card"):
         """White card with a soft blurred shadow toward the bottom right."""
@@ -311,7 +441,7 @@ class Kiosk:
         self.t(W / 2, y + 14, label, 15, True, WHITE)
 
     def arrow_badge(self, x, y, r=18):
-        self.c.create_oval(x - r, y - r, x + r, y + r, fill=BLUE, outline="")
+        self.oval(x - r, y - r, x + r, y + r, fill=BLUE, outline="")
         self.c.create_line(x - 7, y, x + 7, y, fill=WHITE, width=2.5, capstyle="round")
         self.c.create_line(x + 2, y - 5, x + 7, y, x + 2, y + 5, fill=WHITE,
                            width=2.5, capstyle="round", joinstyle="round")
@@ -321,20 +451,20 @@ class Kiosk:
         colour = GREEN if ok else OFF_GREY
         w = self.measure(label, 15, True) + 16
         left = x - w / 2
-        self.c.create_oval(left, y - 4, left + 8, y + 4, fill=colour, outline="")
+        self.oval(left, y - 4, left + 8, y + 4, fill=colour, outline="")
         self.t(left + 16, y, label, 15, True, colour, "w")
 
     def alert(self, x, y, r, colour, ring):
-        self.c.create_oval(x - r - 10, y - r - 10, x + r + 10, y + r + 10, fill=ring, outline="")
-        self.c.create_oval(x - r, y - r, x + r, y + r, fill=colour, outline="")
+        self.oval(x - r - 10, y - r - 10, x + r + 10, y + r + 10, fill=ring, outline="")
+        self.oval(x - r, y - r, x + r, y + r, fill=colour, outline="")
         self.c.create_line(x, y - r * 0.5, x, y + r * 0.12, fill=WHITE,
                            width=max(3, r * 0.17), capstyle="round")
         d = max(2.5, r * 0.11)
-        self.c.create_oval(x - d, y + r * 0.38 - d, x + d, y + r * 0.38 + d, fill=WHITE, outline="")
+        self.oval(x - d, y + r * 0.38 - d, x + d, y + r * 0.38 + d, fill=WHITE, outline="")
 
     def check_mark(self, x, y, r, colour, ring):
-        self.c.create_oval(x - r - 10, y - r - 10, x + r + 10, y + r + 10, fill=ring, outline="")
-        self.c.create_oval(x - r, y - r, x + r, y + r, fill=colour, outline="")
+        self.oval(x - r - 10, y - r - 10, x + r + 10, y + r + 10, fill=ring, outline="")
+        self.oval(x - r, y - r, x + r, y + r, fill=colour, outline="")
         s = r / 30
         self.c.create_line(x - 13 * s, y + 1 * s, x - 3 * s, y + 11 * s, x + 14 * s, y - 10 * s,
                            fill=WHITE, width=5 * s, capstyle="round", joinstyle="round")
@@ -346,16 +476,16 @@ class Kiosk:
                       y + thick / 2, BLUE)
 
     def spinner_ring(self, x, y, r, width=10):
-        self.c.create_oval(x - r, y - r, x + r, y + r, outline=LIGHT, width=width)
-        self.spinner = self.c.create_arc(x - r, y - r, x + r, y + r, start=self.spin_angle,
+        self.oval(x - r, y - r, x + r, y + r, outline=LIGHT, width=width)
+        self.spinner = self.arc(x - r, y - r, x + r, y + r, start=self.spin_angle,
                                          extent=-110, style="arc", outline=BLUE, width=width)
         if "spin" not in self.jobs:
             self.jobs["spin"] = self.root.after(50, self.spin)
 
     def countdown_ring(self, x, y, r, left, total):
-        self.c.create_oval(x - r, y - r, x + r, y + r, outline=LIGHT, width=8)
+        self.oval(x - r, y - r, x + r, y + r, outline=LIGHT, width=8)
         if left > 0:
-            self.c.create_arc(x - r, y - r, x + r, y + r, start=90,
+            self.arc(x - r, y - r, x + r, y + r, start=90,
                               extent=-359.9 * min(1, left / total), style="arc",
                               outline=BLUE, width=8)
         self.t(x, y, str(max(0, math.ceil(left))), 24, True, INK)
@@ -410,7 +540,7 @@ class Kiosk:
 
     def stepper(self, x, y, sign, enabled, command):
         def draw(fill, ink, outline, r=18):
-            self.c.create_oval(x - r, y - r, x + r, y + r, fill=fill, outline=outline, width=2)
+            self.oval(x - r, y - r, x + r, y + r, fill=fill, outline=outline, width=2)
             self.c.create_line(x - 7, y, x + 7, y, fill=ink, width=3, capstyle="round")
             if sign == "+":
                 self.c.create_line(x, y - 7, x, y + 7, fill=ink, width=3, capstyle="round")
@@ -448,6 +578,8 @@ class Kiosk:
 
     def redraw(self):
         self.c.delete("all")
+        self.shape_refs.clear()
+        self.arc_specs.clear()
         self.actions = []
         self.spinner = None
         self.c.create_image(0, 0, image=self.img["bg"], anchor="nw")
@@ -474,42 +606,20 @@ class Kiosk:
         self.rounded(112, 124, 688, 332, 28, WHITE)
         self.t(W / 2, 168, self.tr("Welcome to"), 36, False, GREY)
 
-        # Measure the wordmark so the whole lockup stays centred with any font.
+        # Keep the centred wordmark within the panel with any system font.
         wordmark = "D’MARBY"
         wordmark_px = 60
         while self.measure(wordmark, wordmark_px, True) > 394 and wordmark_px > 36:
             wordmark_px -= 1
-        wordmark_width = self.measure(wordmark, wordmark_px, True)
-        lockup_left = (W - (92 + 22 + wordmark_width)) / 2
-        cx, cy = lockup_left + 46, 251
-        text_left = lockup_left + 114
-
-        # Soft layered shadow keeps the emblem lifted from the white panel.
-        for radius, colour in ((48, "#F2F4F8"), (47, "#E3E8F1"), (46, "#C2CDDF")):
-            self.c.create_oval(cx + 3 - radius, cy + 5 - radius,
-                               cx + 3 + radius, cy + 5 + radius, fill=colour, outline="")
-        # Coin-and-exchange emblem drawn in Tk: no image or font downloads.
-        self.c.create_oval(cx - 46, cy - 46, cx + 46, cy + 46, fill=BLUE, outline="")
-        self.c.create_oval(cx - 24, cy - 24, cx + 24, cy + 24, fill="#F2C66D", outline="")
-        self.c.create_oval(cx - 19, cy - 19, cx + 19, cy + 19,
-                           outline="#BD8D35", width=1)
-        self.t(cx, cy, "₱", 30, True, INK)
-        for start in (155, 335):
-            points = []
-            for step in range(26):
-                angle = math.radians(start - step * 5)
-                points.extend((cx + 35 * math.cos(angle), cy - 35 * math.sin(angle)))
-            self.c.create_line(points, fill=WHITE, width=2, smooth=True,
-                               capstyle="round", arrow="last", arrowshape=(6, 7, 3))
         # Fade the shadow outward, then draw the solid extra-bold lettering.
         stroke = ((-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0),
                   (-1, 1), (0, 1), (1, 1), (0, 0))
         for offset_x, offset_y, colour in ((4, 6, "#F2F4F8"), (3, 4, "#E3E8F1"),
                                            (2, 3, "#C2CDDF"), (0, 0, INK)):
             for dx, dy in stroke:
-                self.t(text_left + offset_x + dx, 237 + offset_y + dy,
-                       wordmark, wordmark_px, True, colour, "w")
-        self.t(text_left + wordmark_width / 2, 284, "COIN EXCHANGE", 15, True, GREY)
+                self.t(W / 2 + offset_x + dx, 237 + offset_y + dy,
+                       wordmark, wordmark_px, True, colour)
+        self.t(W / 2, 284, "COIN EXCHANGE", 15, True, GREY)
         self.edge("left", "Contact us", self.go("contact"), w=212)
         self.edge("right", "Start", self.go("exchange_type"), w=212)
 
@@ -523,8 +633,8 @@ class Kiosk:
         self.card(x1, y1, x2, y2)
         cx = W / 2
         # phone icon: handset drawn in a blue circle
-        self.c.create_oval(cx - 32, y1 + 24, cx + 32, y1 + 88, fill=TINT, outline="")
-        self.c.create_oval(cx - 22, y1 + 34, cx + 22, y1 + 78, fill=BLUE, outline="")
+        self.oval(cx - 32, y1 + 24, cx + 32, y1 + 88, fill=TINT, outline="")
+        self.oval(cx - 22, y1 + 34, cx + 22, y1 + 78, fill=BLUE, outline="")
         self.c.create_line(cx - 9, y1 + 46, cx - 9, y1 + 52, cx - 2, y1 + 62, cx + 6, y1 + 68,
                            cx + 11, y1 + 68, fill=WHITE, width=5, capstyle="round", joinstyle="round",
                            smooth=True)
@@ -854,7 +964,7 @@ class Kiosk:
                          lambda a=(x1, y1, x2, y2): self.press_card(*a))
                 if i == self.combine_choice:
                     self.rounded(x1 - 3, y1 - 3, x2 + 3, y2 + 3, 26, "", BLUE, 4)
-                    self.c.create_oval(x2 - 26, y1 - 14, x2 + 6, y1 + 18, fill=BLUE, outline=WHITE, width=3)
+                    self.oval(x2 - 26, y1 - 14, x2 + 6, y1 + 18, fill=BLUE, outline=WHITE, width=3)
                     self.c.create_line(x2 - 17, y1 + 2, x2 - 12, y1 + 7, x2 - 3, y1 - 3, fill=WHITE,
                                        width=3, capstyle="round", joinstyle="round")
         chosen = options[self.combine_choice] if self.combine_choice < n else None
@@ -943,7 +1053,7 @@ class Kiosk:
         if gc:
             ny = y2 - 32
             self.pill(x1 + 22, ny - 17, x2 - 22, ny + 17, TINT)
-            self.c.create_oval(x1 + 36, ny - 9, x1 + 54, ny + 9, fill=BLUE, outline="")
+            self.oval(x1 + 36, ny - 9, x1 + 54, ny + 9, fill=BLUE, outline="")
             self.t(x1 + 45, ny, "i", 13, True, WHITE)
             self.t(x1 + 64, ny, f"{self.tr('Includes 5% fee:')} {money(self.gc_amount)} + {money(self.gc_fee)} "
                    f"{self.tr('fee')}", 15, True, INK, "w")
@@ -1066,9 +1176,9 @@ class Kiosk:
         cx = W / 2
         self.note(value, cx, y1 + 74, 146)
         bx, by = cx + 70, y1 + 40
-        self.c.create_oval(bx - 18, by - 18, bx + 18, by + 18, fill=AMBER, outline=WHITE, width=3)
+        self.oval(bx - 18, by - 18, bx + 18, by + 18, fill=AMBER, outline=WHITE, width=3)
         self.c.create_line(bx, by - 8, bx, by + 2, fill=WHITE, width=4, capstyle="round")
-        self.c.create_oval(bx - 2.5, by + 6, bx + 2.5, by + 11, fill=WHITE, outline="")
+        self.oval(bx - 2.5, by + 6, bx + 2.5, by + 11, fill=WHITE, outline="")
         self.t(cx, y1 + 154, f"{self.tr('You inserted a')} {money(value)} {self.tr('bill')}", 30, True, INK)
         self.t(cx, y1 + 190, f"{self.tr('Not the')} {money(picked)} {self.tr('you picked.')}", 17, True, "#B45309")
         self.c.create_line(x1 + 40, y1 + 222, x2 - 40, y1 + 222, fill=LIGHT, width=2)
@@ -1106,7 +1216,7 @@ class Kiosk:
             put_label, put_sub = money(self.credit), plural(sum(coins_in.values()))
         self.t(lx, y1 + 160, put_label, 30, True, INK)
         self.t(lx, y1 + 190, put_sub, 15, True, GREY)
-        self.c.create_oval(mid - 24, y1 + 68, mid + 24, y1 + 116, fill=TINT, outline="")
+        self.oval(mid - 24, y1 + 68, mid + 24, y1 + 116, fill=TINT, outline="")
         self.c.create_line(mid - 10, y1 + 92, mid + 10, y1 + 92, fill=BLUE, width=3.5, capstyle="round")
         self.c.create_line(mid + 2, y1 + 84, mid + 10, y1 + 92, mid + 2, y1 + 100, fill=BLUE,
                            width=3.5, capstyle="round", joinstyle="round")
@@ -1234,9 +1344,9 @@ class Kiosk:
         if info["kind"] == "cant_change" and info["bill"]:
             self.note(info["bill"], cx, y1 + 48, 96)
             bx, by = cx + 46, y1 + 26
-            self.c.create_oval(bx - 14, by - 14, bx + 14, by + 14, fill=RED, outline=WHITE, width=3)
+            self.oval(bx - 14, by - 14, bx + 14, by + 14, fill=RED, outline=WHITE, width=3)
             self.c.create_line(bx, by - 6, bx, by + 2, fill=WHITE, width=3.5, capstyle="round")
-            self.c.create_oval(bx - 2, by + 5, bx + 2, by + 9, fill=WHITE, outline="")
+            self.oval(bx - 2, by + 5, bx + 2, by + 9, fill=WHITE, outline="")
             head = self.tr("We can't change") + f" {money(info['amount'])} " + self.tr("right now")
             sub = self.tr("Not enough coins in the machine.")
             recorded = f"{self.tr('Your')} {money(info['amount'])} {self.tr('is recorded. Contact us at')}"
@@ -1371,7 +1481,7 @@ class Kiosk:
             if i < len(digits):
                 self.t(x + 8, y1 + 100, digits[i], 26, True, INK)
             else:
-                self.c.create_oval(x + 2, y1 + 94, x + 14, y1 + 106, fill="#C5CEE0", outline="")
+                self.oval(x + 2, y1 + 94, x + 14, y1 + 106, fill="#C5CEE0", outline="")
             x += 24
         self.t(x1 + 26, y1 + 142, self.tr("Mobile number linked to your GCash"), 15, False, GREY, "w")
         self.rounded(x1 + 22, y1 + 180, x2 - 22, y1 + 232, 14, TINT)
@@ -1679,7 +1789,7 @@ class Kiosk:
             return
         self.spin_angle = (self.spin_angle - 12) % 360
         try:
-            self.c.itemconfigure(self.spinner, start=self.spin_angle)
+            self.arc_start(self.spinner, self.spin_angle)
         except tk.TclError:
             return
         self.jobs["spin"] = self.root.after(50, self.spin)
