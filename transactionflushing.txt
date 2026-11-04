@@ -1,0 +1,17 @@
+.venv/bin/python - <<'PY'
+from pathlib import Path
+from shutil import copy2
+from time import time_ns
+from coin_changer_hardware import atomic_json
+
+path = Path("transaction_state.json")
+if path.read_bytes().strip():
+    raise SystemExit("Journal contains data. Leave it unchanged and paste its contents.")
+if path.with_suffix(".json.tmp").exists():
+    raise SystemExit("A recovery .tmp file exists. Leave both files unchanged.")
+
+backup = path.with_name(f"{path.name}.{time_ns()}.bak")
+copy2(path, backup)
+atomic_json(path, {})
+print("Journal initialized. Backup:", backup)
+PY
