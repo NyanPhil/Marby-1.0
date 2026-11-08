@@ -28,6 +28,7 @@ class KioskHardwareMixin:
 
     def __init__(self, root, cfg):
         self._hw_ready = False
+        self._recovery_locked = False
         self._syncing = False
         self._deposit_open = None
         self._payout_future = None
@@ -42,7 +43,10 @@ class KioskHardwareMixin:
             self._hw_ready = True
             self.stock = self._stock_from_backend()
             self.gcash_balance = 0  # A demo balance is never usable in hardware mode.
-            self.redraw()
+            if self.hardware.storage.unresolved:
+                self._show_saved_incident()
+            else:
+                self.redraw()
             self._hardware_tick()
         except Exception:
             self.hardware.close()
@@ -60,6 +64,34 @@ class KioskHardwareMixin:
         delivered = sum(float(c) * n for c, n in state.get("dispensed", {}).items())
         return max(0, int(received - delivered))
 
+    def _show_saved_incident(self):
+        """Reopen the kiosk without overwriting an unresolved cash journal.
+
+        Reopening is not a settlement and must never create a second payout.
+        The operator uses marby_service.py after inspecting physical cash.
+        """
+        state = self.hardware.storage.state
+        self._recovery_locked = True
+        self.hardware.stopping.set()
+        self.hardware.set_acceptance(None)
+        self._deposit_open = None
+        self.transaction_ref = str(state.get("reference") or "")
+        self.credit = state.get("credit", 0)
+        self.inserted = [(entry.get("source"), entry.get("value"))
+                         for entry in state.get("received", [])]
+        self.incident_dismissed = False
+        self.fault = self.incident_info = {
+            "kind": "hardware",
+            "amount": self._owed(),
+            "ref": self.transaction_ref or "STAFF REVIEW",
+            "bill": next((value for source, value in reversed(self.inserted)
+                          if source == "bill"), None),
+            "detail": state.get("fault") or (
+                "Unfinished transaction recovered after restart; "
+                "staff must reconcile before accepting cash."),
+        }
+        self.show("incident")
+
     def show(self, screen, overlay=None):
         if self._hw_ready:
             pending = self.hardware.input_pending()
@@ -67,11 +99,18 @@ class KioskHardwareMixin:
                 self.last_input = time.monotonic()
                 return
             unresolved = self.hardware.storage.unresolved
-            if screen == "welcome" and unresolved and not self.incident_dismissed:
-                self._hardware_fault("An unfinished deposit cannot be cleared by returning home.")
-                return
-            if unresolved and self.incident_dismissed and screen not in ("welcome", "incident", "admin"):
+            if self._recovery_locked and screen not in ("incident", "admin"):
+                # On a restarted, unfinished exchange, screens stay service-only.
+                # Unlike an active paid deposit, this must never be reopened.
                 screen, overlay = "incident", None
+            elif not self._recovery_locked:
+                # Preserve normal in-flight cash flow while locking attempts
+                # to erase an unfinished exchange by returning to Welcome.
+                if screen == "welcome" and unresolved and not self.incident_dismissed:
+                    self._hardware_fault("An unfinished deposit cannot be cleared by returning home.")
+                    return
+                if unresolved and self.incident_dismissed and screen not in ("welcome", "incident", "admin"):
+                    screen, overlay = "incident", None
         super().show(screen, overlay)
         if self._hw_ready:
             self._sync_acceptance()
@@ -327,8 +366,13 @@ class KioskHardwareMixin:
         try:
             self.hardware.set_acceptance(None)
             self.hardware.stopping.set()
-            if self.hardware.storage.unresolved or self.hardware.input_pending():
-                self.hardware.storage.fault("Application closed with an unfinished exchange; staff review required.")
+            if (not self._recovery_locked
+                    and (self.hardware.storage.state.get("status") in ("paid", "dispensing")
+                         or self.hardware.input_pending())):
+                # A recovered journal stays untouched across repeated UI closes.
+                # A newly interrupted live transaction is marked for staff review.
+                self.hardware.storage.fault(
+                    "Application closed with an unfinished exchange; staff review required.")
         finally:
             self._executor.shutdown(wait=False, cancel_futures=True)
             self.hardware.close()

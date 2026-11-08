@@ -309,8 +309,9 @@ class RealHardware:
                 raise HardwareFault('Duplicate denominations in ' + source + ' pulse map.')
             self.maps[source] = mapping
         self.storage = Storage(cfg, references=references)
-        if self.storage.unresolved:
-            raise HardwareFault('Unresolved transaction in transaction_state.json; operator must reconcile.')
+        # An unfinished transaction must lock cash movement, not prevent the
+        # touchscreen from reopening. Keep the original journal untouched.
+        # The UI displays the saved reference/balance in a service incident.
         try:
             self.storage.references.ensure_ready()
         except Exception as error:
@@ -323,6 +324,10 @@ class RealHardware:
         self._input_fault = None
         self.frame_permission = {'bill': None, 'coin': None}
         self.stopping = threading.Event()
+        if self.storage.unresolved:
+            # Recovery mode is fail-closed: even a stray UI call cannot
+            # re-enable acceptors or drive a dispenser before reconciliation.
+            self.stopping.set()
         self.pulses = {s: pulse_counter_for(cfg, s) for s in ('bill', 'coin')}
         self.rearm_quiet = {s: float(cfg.get(s + '_rearm_quiet_seconds', self.pulses[s].gap_s))
                             for s in ('bill', 'coin')}
