@@ -2,6 +2,8 @@
 
 The kiosk keeps working with or without internet. A background thread:
   * every 15 s sends transaction rows that are new or changed since the last send
+  * every 15 s picks up refills / stock counts queued on the dashboard and has the
+    kiosk apply them (only between transactions), then reports the result
   * every 60 s sends a heartbeat (coin counts, journal status, fault)
 
 Settings come from environment variables, or files in ~/.config/dmarby/:
@@ -51,9 +53,11 @@ class SyncError(RuntimeError):
 
 
 class KioskSync:
-    def __init__(self, db_path, status=None):
+    def __init__(self, db_path, status=None, apply=None):
         self.db_path = str(db_path)
         self.status = status or (lambda: {})
+        # apply(adjustment) -> ("applied" | "rejected", before, after, note) or None if busy.
+        self.apply = apply
         self.url = setting("DMARBY_SUPABASE_URL", "supabase_url").rstrip("/")
         self.key = setting("DMARBY_SUPABASE_KEY", "supabase_key")
         self.kiosk_key = setting("DMARBY_KIOSK_KEY", "kiosk_key")
@@ -91,6 +95,9 @@ class KioskSync:
     def _connect(self):
         db = sqlite3.connect(self.db_path, timeout=10)
         db.execute("CREATE TABLE IF NOT EXISTS sync_state (number INTEGER PRIMARY KEY, fingerprint TEXT NOT NULL)")
+        # Remembers applied dashboard adjustments, so a lost acknowledgement never applies one twice.
+        db.execute("CREATE TABLE IF NOT EXISTS applied_adjustments (id INTEGER PRIMARY KEY, status TEXT NOT NULL, "
+                   "before_count INTEGER, after_count INTEGER, note TEXT)")
         return db
 
     @staticmethod
@@ -141,6 +148,30 @@ class KioskSync:
             sent += len(chunk)
         return sent
 
+    def adjustments(self):
+        """Apply refills / counts queued on the dashboard. Returns how many were handled."""
+        if not self.apply:
+            return 0
+        pending = self._rpc("kiosk_pending_adjustments", {"p_key": self.kiosk_key}) or []
+        handled = 0
+        for adj in pending:
+            with closing(self._connect()) as db:
+                done = db.execute("SELECT status, before_count, after_count, note FROM applied_adjustments "
+                                  "WHERE id = ?", (adj["id"],)).fetchone()
+            if done is None:
+                result = self.apply(adj)
+                if result is None:
+                    break           # kiosk is busy; try again next round
+                with closing(self._connect()) as db, db:
+                    db.execute("INSERT OR REPLACE INTO applied_adjustments VALUES (?, ?, ?, ?, ?)",
+                               (adj["id"], *result))
+                done = result
+            status, before, after, note = done
+            self._rpc("kiosk_ack_adjustment", {"p_key": self.kiosk_key, "p_id": adj["id"], "p_status": status,
+                                               "p_before": before, "p_after": after, "p_note": note})
+            handled += 1
+        return handled
+
     def heartbeat(self):
         status = dict(self.status() or {})
         if status.get("mode") == "demo" and os.environ.get("DMARBY_SYNC_DEMO") != "1":
@@ -160,6 +191,8 @@ class KioskSync:
             while not self.stop.is_set():
                 try:
                     self.report()
+                    if self.adjustments():
+                        next_beat = 0      # send the new counts right away
                     if time.monotonic() >= next_beat:
                         self.heartbeat()
                         next_beat = time.monotonic() + HEARTBEAT_EVERY_S

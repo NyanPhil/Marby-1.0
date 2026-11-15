@@ -15,8 +15,10 @@ accepted cash on timeout. Existing transaction logs are append-only.
 import json
 import math
 import os
+import queue
 import struct
 import sys
+import threading
 import time
 import tkinter as tk
 import zlib
@@ -266,6 +268,8 @@ class Kiosk:
         self.spin_angle = 90
         self.spinner = None
         self.jobs = {}
+        self.adjustment_queue = queue.Queue()
+        self.adjustment_results = {}   # id -> result, so a retried request is never applied twice
         if not hasattr(self, "references"):
             self.references = self.make_reference_store()
         self.reset_session()
@@ -627,6 +631,64 @@ class Kiosk:
                 "fault": (fault.get("detail") or fault.get("kind")) if fault else None,
                 "inventory": {str(c): int(n) for c, n in dict(self.stock).items()},
                 "capacity": {str(c): n for c, n in START_STOCK.items()}}
+
+    # Dashboard refills and counts --------------------------------------
+
+    def apply_stock_adjustment(self, adj):
+        """Called from the sync thread. Hands the change to the Tk thread and waits for the result."""
+        if self.closed:
+            return None
+        box = {"done": threading.Event()}
+        self.adjustment_queue.put((adj, box))
+        if not box["done"].wait(10):
+            box["abandoned"] = True
+            return None
+        return box.get("result")
+
+    def kiosk_busy(self):
+        """True while money is in play, so stock never changes under a transaction."""
+        if self.credit or self.screen in ("insert", "review", "dispensing", "wrong_bill"):
+            return True
+        hardware = getattr(self, "hardware", None)
+        return bool(hardware and (hardware.storage.unresolved or hardware.input_pending()))
+
+    def drain_adjustments(self):
+        while True:
+            try:
+                adj, box = self.adjustment_queue.get_nowait()
+            except queue.Empty:
+                return
+            known = self.adjustment_results.get(adj["id"])
+            if known is None and not box.get("abandoned") and not self.kiosk_busy():
+                try:
+                    known = self.change_stock(adj)
+                except Exception as error:
+                    known = ("rejected", None, None, str(error)[:200])
+                self.adjustment_results[adj["id"]] = known
+            box["result"] = known
+            box["done"].set()
+
+    def change_stock(self, adj):
+        coin, amount = int(adj["coin"]), int(adj["amount"])
+        if coin not in self.stock:
+            return ("rejected", None, None, f"This machine has no PHP {coin} hopper.")
+        before = int(self.stock[coin])
+        after = before + amount if adj["kind"] == "refill" else amount
+        hardware = getattr(self, "hardware", None)
+        if hardware:
+            from coin_changer_hardware import atomic_json
+            storage = hardware.storage
+            with storage._lock:
+                storage.inventory[str(coin)] = after
+                atomic_json(storage.inventory_path, storage.inventory)
+            self.stock = self._stock_from_backend()
+        else:
+            self.stock[coin] = after
+        self.log("stock_adjustment", adjustment=adj["id"], coin=coin, change=adj["kind"],
+                 before=before, after=after)
+        if self.screen in ("admin", "out_of_coins", "pick_bill", "pick_coin", "build_mix"):
+            self.redraw()
+        return ("applied", before, after, None)
 
     def notification_store(self):
         from dmarby_integration import Notifications
@@ -1989,6 +2051,7 @@ class Kiosk:
     def tick(self):
         if self.closed:
             return
+        self.drain_adjustments()
         now = time.monotonic()
         idle = now - self.last_input
         on_screen = now - self.screen_since
@@ -2081,7 +2144,7 @@ def main(argv=None):
             app.notification_store().start()
         from dmarby_sync import KioskSync
         app.dashboard_sync = KioskSync(os.path.join(BASE_DIR, "transaction_numbers.sqlite3"),
-                                       status=app.sync_status)
+                                       status=app.sync_status, apply=app.apply_stock_adjustment)
         app.dashboard_sync.start()
         root.mainloop()
         if not app.closed:

@@ -361,6 +361,35 @@ class IntegrationTests(unittest.TestCase):
             "SELECT kind, status, details FROM transactions WHERE number=?", (int(ref),)).fetchone()
         return row[0], row[1], json.loads(row[2])
 
+    def adjust(self, adj):
+        import threading
+        box = {"done": threading.Event()}
+        self.app.adjustment_queue.put((adj, box))
+        self.app.drain_adjustments()
+        return box["result"]
+
+    def test_dashboard_refill_updates_hardware_inventory(self):
+        result = self.adjust({"id": 1, "coin": 5, "kind": "refill", "amount": 40})
+        self.assertEqual(result, ("applied", 100, 140, None))
+        saved = json.loads(Path(self.cfg["inventory_file"]).read_text())
+        self.assertEqual(saved["5"], 140)
+        self.assertEqual(self.app.stock[5], 140)
+        # The same request arriving again is not applied twice.
+        self.assertEqual(self.adjust({"id": 1, "coin": 5, "kind": "refill", "amount": 40}), result)
+        self.assertEqual(json.loads(Path(self.cfg["inventory_file"]).read_text())["5"], 140)
+
+    def test_dashboard_count_sets_hardware_inventory(self):
+        self.assertEqual(self.adjust({"id": 2, "coin": 20, "kind": "count", "amount": 37}),
+                         ("applied", 100, 37, None))
+        self.assertEqual(json.loads(Path(self.cfg["inventory_file"]).read_text())["20"], 37)
+
+    def test_dashboard_refill_waits_while_cash_is_in_the_machine(self):
+        self.bill()
+        self.train("bill", 5)
+        self.assertEqual(self.app.credit, 50)
+        self.assertIsNone(self.adjust({"id": 3, "coin": 5, "kind": "refill", "amount": 40}))
+        self.assertEqual(json.loads(Path(self.cfg["inventory_file"]).read_text())["5"], 100)
+
     def test_gcash_accepts_coins_only(self):
         self.gcash()
         self.assertEqual(self.app.screen, "insert")
