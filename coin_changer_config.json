@@ -20,8 +20,8 @@
   "bill_max_frame_seconds": 45.0,
   "coin_max_frame_seconds": 60.0,
   "inhibit_verified": {
-    "bill": false,
-    "coin": false
+    "bill": true,
+    "coin": true
   },
   "input_pin": {
     "bill": 27,
