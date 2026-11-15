@@ -617,6 +617,17 @@ class Kiosk:
         self.overlay = overlay
         self.redraw()
 
+    def sync_status(self):
+        """What the dashboard heartbeat reports. Called from the sync thread."""
+        hardware = getattr(self, "hardware", None)
+        journal = hardware.storage.state.get("status") if hardware else None
+        fault = self.fault or {}
+        return {"mode": "demo" if DEMO_MODE else "hardware",
+                "journal_status": journal,
+                "fault": (fault.get("detail") or fault.get("kind")) if fault else None,
+                "inventory": {str(c): int(n) for c, n in dict(self.stock).items()},
+                "capacity": {str(c): n for c, n in START_STOCK.items()}}
+
     def notification_store(self):
         from dmarby_integration import Notifications
         if not hasattr(self, "notifications"):
@@ -2022,6 +2033,8 @@ class Kiosk:
         self.closed = True
         if hasattr(self, "notifications"):
             self.notifications.stop.set()
+        if getattr(self, "dashboard_sync", None):
+            self.dashboard_sync.stop.set()
         for job in self.jobs.values():
             try:
                 self.root.after_cancel(job)
@@ -2066,6 +2079,10 @@ def main(argv=None):
             app = Kiosk(root)
         if not DEMO_MODE or os.environ.get("DMARBY_EMAIL_DEMO") == "1":
             app.notification_store().start()
+        from dmarby_sync import KioskSync
+        app.dashboard_sync = KioskSync(os.path.join(BASE_DIR, "transaction_numbers.sqlite3"),
+                                       status=app.sync_status)
+        app.dashboard_sync.start()
         root.mainloop()
         if not app.closed:
             app.close()
