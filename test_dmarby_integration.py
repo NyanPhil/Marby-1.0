@@ -459,8 +459,80 @@ class IntegrationTests(unittest.TestCase):
         self.app.close()
         self.assertEqual(self.app.hardware.storage.state["status"], "fault")
         self.assertEqual(self.app.hardware.storage.state["credit"], 50)
-        with self.assertRaisesRegex(HardwareFault, "Unresolved transaction"):
-            Connected(Root(), self.cfg)
+        # Restarting shows the saved receipt once, then the kiosk keeps going.
+        self.app = Connected(Root(), self.cfg)
+        self.addCleanup(self.app.close)
+        self.app.hardware.kit.on_release = lambda channel: self.app.hardware._on_drop()
+        self.assertEqual(self.app.screen, "incident")
+        self.assertEqual(self.app.incident_info["amount"], 50)
+        self.app.exit_incident()
+        self.assert_kiosk_keeps_going(parked_credit=50)
+
+    # -- The kiosk keeps going after any failure --------------------------------
+
+    def parked(self):
+        path = self.folder / "parked_incidents.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def assert_kiosk_keeps_going(self, parked_credit=None):
+        """After leaving a failure: recorded, parked, and a full exchange works."""
+        self.assertEqual(self.app.screen, "welcome")
+        self.assertIsNone(self.app.fault)
+        self.assertEqual(self.app.hardware.storage.state["status"], "parked")
+        self.assertFalse(self.app.hardware.stopping.is_set())
+        if parked_credit is not None:
+            self.assertEqual(self.parked()[-1]["credit"], parked_credit)
+        self.app.show("exchange_type")
+        self.assertEqual(self.app.screen, "exchange_type")
+        self.bill()
+        self.assertEqual(self.app.hardware.accepting, "bill")
+        self.train("bill", 5)
+        self.assertEqual(self.app.credit, 50)
+        self.pay()
+        self.assertEqual(self.app.screen, "done")
+        self.assertEqual(self.app.hardware.storage.state["status"], "completed")
+
+    def test_stray_coin_pulse_is_recorded_then_kiosk_keeps_going(self):
+        self.app.show("welcome")
+        self.train("coin", 1)                       # nobody asked for a coin
+        self.assertEqual(self.app.screen, "incident")
+        self.assertIn("Unexpected coin pulse", self.app.hardware.storage.state["fault"])
+        self.app.exit_incident()
+        self.assertIn("Unexpected coin pulse", self.parked()[-1]["fault"])
+        self.assert_kiosk_keeps_going()
+
+    def test_jam_is_recorded_then_kiosk_keeps_going(self):
+        self.bill()
+        self.train("bill", 5)
+        self.app.hardware.kit.on_release = None     # coin never reaches the exit sensor
+        self.pay()
+        self.assertEqual(self.app.screen, "incident")
+        ref = self.app.incident_info["ref"]
+        self.app.exit_incident()
+        self.assertEqual(self.parked()[-1]["reference"], ref)
+        import sqlite3
+        row = sqlite3.connect(self.folder / "transaction_numbers.sqlite3").execute(
+            "SELECT status FROM transactions WHERE number=?", (int(ref),)).fetchone()
+        self.assertEqual(row[0], "incident")          # still on record for the dashboard
+        self.app.hardware.kit.on_release = lambda channel: self.app.hardware._on_drop()
+        self.assert_kiosk_keeps_going(parked_credit=50)
+
+    def test_incident_screen_returns_home_by_itself(self):
+        self.app.show("welcome")
+        self.train("coin", 1)
+        self.assertEqual(self.app.screen, "incident")
+        self.app.screen_since -= dmarby.AUTO_HOME_S + 1
+        self.app.tick()
+        self.assert_kiosk_keeps_going()
+
+    def test_leaving_with_money_inside_records_the_balance(self):
+        self.bill()
+        self.train("bill", 5)
+        self.app.show("welcome")                    # customer walks off mid-exchange
+        self.assertEqual(self.app.screen, "incident")
+        self.assertEqual(self.app.incident_info["amount"], 50)
+        self.app.exit_incident()
+        self.assert_kiosk_keeps_going(parked_credit=50)
 
     def test_new_exchange_after_committed_payout(self):
         self.bill()

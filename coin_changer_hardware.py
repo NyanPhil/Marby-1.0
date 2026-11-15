@@ -49,7 +49,8 @@ def project_path(path):
 
 
 class Storage:
-    """Crash-visible journal. Unfinished transactions require an operator."""
+    """Crash-visible journal. A failed transaction is recorded, then parked into
+    history so the next customer can start; the record is never lost."""
     def __init__(self, cfg, references=None):
         self.coins = payout_coins_for(cfg)
         self.path = project_path(cfg.get('journal_file', 'transaction_state.json'))
@@ -79,7 +80,7 @@ class Storage:
             if (source not in allowed or type(value) is not int
                     or value not in allowed[source]):
                 raise HardwareFault('Unsupported cash input.')
-            if self.state.get('status') not in ('paid', None, 'completed', 'reconciled'):
+            if self.state.get('status') not in ('paid', None, 'completed', 'reconciled', 'parked'):
                 raise HardwareFault('Another transaction requires operator review.')
             if self.state.get('status') == 'paid' and self.state.get('source') != source:
                 raise HardwareFault('Mixed input sources in a single transaction.')
@@ -185,6 +186,32 @@ class Storage:
             self.state['gcash'] = {'amount': amount, 'fee': fee}
             self.state['completed_at'] = time.time()
             atomic_json(self.path, self.state)
+
+    def park(self, note='Recorded as an incident; the kiosk continued.'):
+        """Move an unfinished or failed journal into parked_incidents.jsonl.
+
+        The incident is already in transaction_numbers.sqlite3 (and the dashboard);
+        this keeps the full journal on disk and frees the slot for the next customer.
+        Returns True if something was parked.
+        """
+        with self._lock:
+            if self.state.get('status') not in ('paid', 'dispensing', 'fault'):
+                return False
+            if self.state.get('status') != 'fault':
+                # Unfinished at restart: record it as an incident before moving on.
+                self.state['fault'] = 'Unfinished transaction found after restart.'
+                self.state['status'] = 'fault'
+                if self.state.get('reference'):
+                    self.references.record(self.state['reference'], 'incident', self.state)
+            record = dict(self.state, parked_at=time.time(), parked_note=note)
+            with open(self.path.with_name('parked_incidents.jsonl'), 'a', encoding='utf8') as f:
+                f.write(json.dumps(record, ensure_ascii=False) + '\n')
+                f.flush()
+                os.fsync(f.fileno())
+            self.state = {'status': 'parked', 'previous_reference': self.state.get('reference'),
+                          'parked_at': record['parked_at']}
+            atomic_json(self.path, self.state)
+            return True
 
     def fault(self, detail):
         with self._lock:
@@ -425,6 +452,23 @@ class RealHardware:
                 raise HardwareFault('Cash signal arrived during cash in. Operator must reconcile the cash.')
             self.storage.complete_transfer(amount, fee)
             self._deposit_source = None
+
+    def resume(self):
+        """After a failure has been recorded, let the next customer start fresh.
+
+        Waits only while a coin or bill is being counted right now (returns False).
+        """
+        with self._accept_lock:
+            if self.input_pending() or any(inp.is_active for inp in self.inputs.values()):
+                return False
+            self.storage.park()
+            self._input_fault = None
+            self._bill_latched = False
+            self._deposit_source = None
+            self.frame_permission = {'bill': None, 'coin': None}
+            self.stopping.clear()
+            self.set_acceptance(None)
+            return True
 
     def _on_drop(self):
         now = time.monotonic()

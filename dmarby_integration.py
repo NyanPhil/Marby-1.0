@@ -4,6 +4,7 @@ All Tk work stays on the main thread. One worker handles sensor-confirmed
 servo cycles; the Tk loop consumes its result before updating the journal.
 """
 import json
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -74,13 +75,13 @@ class KioskHardwareMixin:
         return max(0, int(received - delivered))
 
     def _show_saved_incident(self):
-        """Reopen the kiosk without overwriting an unresolved cash journal.
+        """After a restart mid-transaction, show the saved receipt once.
 
-        Reopening is not a settlement and must never create a second payout.
-        The operator uses marby_service.py after inspecting physical cash.
+        Reopening never pays anything out. Leaving the receipt (Main menu, or
+        automatically after a minute) records it as an incident, moves the journal
+        into parked_incidents.jsonl and lets the next customer start.
         """
         state = self.hardware.storage.state
-        self._recovery_locked = True
         self.hardware.stopping.set()
         self.hardware.set_acceptance(None)
         self._deposit_open = None
@@ -95,9 +96,7 @@ class KioskHardwareMixin:
             "ref": self.transaction_ref or "STAFF REVIEW",
             "bill": next((value for source, value in reversed(self.inserted)
                           if source == "bill"), None),
-            "detail": state.get("fault") or (
-                "Unfinished transaction recovered after restart; "
-                "staff must reconcile before accepting cash."),
+            "detail": state.get("fault") or "Unfinished transaction found after restart.",
         }
         self.show("incident")
 
@@ -107,19 +106,12 @@ class KioskHardwareMixin:
             if pending and screen not in ("insert", "incident", "admin"):
                 self.last_input = time.monotonic()
                 return
-            unresolved = self.hardware.storage.unresolved
-            if self._recovery_locked and screen not in ("incident", "admin"):
-                # On a restarted, unfinished exchange, screens stay service-only.
-                # Unlike an active paid deposit, this must never be reopened.
-                screen, overlay = "incident", None
-            elif not self._recovery_locked:
-                # Preserve normal in-flight cash flow while locking attempts
-                # to erase an unfinished exchange by returning to Welcome.
-                if screen == "welcome" and unresolved and not self.incident_dismissed:
-                    self._hardware_fault("An unfinished deposit cannot be cleared by returning home.")
-                    return
-                if unresolved and self.incident_dismissed and screen not in ("welcome", "paused", "contact", "incident", "admin"):
-                    screen, overlay = "incident", None
+            # Leaving a deposit with money in it records the balance as an incident
+            # first, so the customer's money is never silently forgotten.
+            if (screen == "welcome" and self.hardware.storage.unresolved
+                    and not self.incident_dismissed and not self.fault):
+                self._hardware_fault("Customer left before finishing; balance recorded.")
+                return
         super().show(screen, overlay)
         if self._hw_ready:
             self._sync_acceptance()
@@ -189,6 +181,21 @@ class KioskHardwareMixin:
         else:
             self.show("insert")
 
+    def exit_incident(self):
+        """Leave the receipt; the incident stays recorded and the kiosk keeps going."""
+        try:
+            self.hardware.resume()
+        except Exception as exc:
+            print(f"Could not reset hardware after incident: {exc}", file=sys.stderr)
+        self._deposit_open = None
+        super().exit_incident()
+
+    def _hardware_resume_tick(self):
+        # If resume had to wait for a coin being counted, finish it once quiet.
+        if (not self.fault and self.screen in ("welcome", "contact", "paused")
+                and (self.hardware.storage.unresolved or self.hardware.stopping.is_set())):
+            self.hardware.resume()
+
     def reroute_bill(self):
         if self.fault:
             return False
@@ -224,6 +231,7 @@ class KioskHardwareMixin:
                     if self.screen == "dispensing" and self.dropped < len(self.queue):
                         self._next_coin()
             if not self.fault:
+                self._hardware_resume_tick()
                 self._sync_acceptance()
         except Exception as exc:
             self._hardware_fault(str(exc))

@@ -1586,7 +1586,8 @@ class Kiosk:
         self.edge("right", "Main menu  →", self.exit_incident, w=240)
 
     def exit_incident(self):
-        """Dismiss the receipt; hardware debt and the acceptance lock remain."""
+        """Leave the receipt. The incident stays recorded; the kiosk keeps going."""
+        self.fault = None
         self.incident_dismissed = True
         self.show("welcome")
 
@@ -2079,8 +2080,8 @@ class Kiosk:
                 self.show("welcome")
             elif self.screen in ("out_of_coins",) and on_screen >= 8:
                 self.show("welcome")
-            elif self.screen == "incident" and not self.fault and on_screen >= AUTO_HOME_S:
-                self.show("welcome")
+            elif self.screen == "incident" and on_screen >= AUTO_HOME_S:
+                self.exit_incident()
             elif self.screen in ("done", "gc_success"):
                 self.redraw()  # countdown text
             elif self.waiting_for_money():

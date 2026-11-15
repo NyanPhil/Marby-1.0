@@ -10,3 +10,4 @@ reconciliations.jsonl
 __pycache__/
 *.pyc
 .venv/
+parked_incidents.jsonl
