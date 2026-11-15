@@ -317,6 +317,26 @@ def pulse_counter_for(cfg, source):
         max_frame_s=float(cfg.get(source + '_max_frame_seconds', 45.0 if source == 'bill' else 60.0)))
 
 
+def servo_angles(cfg, setting):
+    """Physical (home, release) angles for one servo, honouring its direction.
+
+    Every servo is configured with the same logical angles. A servo set to turn
+    the other way from the hardware's natural direction is mirrored
+    (actuation_range - angle), exactly like servo_test.py.
+    """
+    direction = setting.get('direction', 'counterclockwise')
+    if direction not in ('clockwise', 'counterclockwise'):
+        raise HardwareFault(f'Servo direction must be clockwise or counterclockwise, not {direction!r}.')
+    span = float(setting.get('actuation_range', 180))
+    home, release = float(setting['home_angle']), float(setting['release_angle'])
+    if not (0 <= home <= span and 0 <= release <= span):
+        raise HardwareFault('Servo angles must be within the actuation range.')
+    natural_clockwise = bool(cfg.get('increasing_angle_turns_clockwise', False))
+    if (direction == 'clockwise') != natural_clockwise:
+        home, release = span - home, span - release
+    return home, release
+
+
 class RealHardware:
     def __init__(self, cfg, references=None):
         self.cfg = cfg
@@ -324,7 +344,9 @@ class RealHardware:
         for field in ('bill', 'coin'):
             if not cfg.get('inhibit_verified', {}).get(field, False):
                 raise HardwareFault(f'{field} inhibit circuit not verified. Block money entry until verified.')
-        if cfg.get('drop_sensor_pin') is None:
+        # Without a coin-exit sensor, each servo cycle counts as one coin dispensed.
+        self.use_drop_sensor = bool(cfg.get('coin_exit_sensor', True))
+        if self.use_drop_sensor and cfg.get('drop_sensor_pin') is None:
             raise HardwareFault('Coin-exit sensor required in real-money mode.')
         for coin in self.coins:
             if not cfg.get('servo_verified', {}).get(str(coin), False):
@@ -333,7 +355,9 @@ class RealHardware:
         if (any(type(ch) is not int or ch not in range(16) for ch in channels)
                 or len(channels) != len(set(channels))):
             raise HardwareFault('Payout servo channels must be unique PCA9685 outputs 0..15.')
-        pins = list(cfg['input_pin'].values()) + list(cfg['inhibit_pin'].values()) + [cfg['drop_sensor_pin']]
+        pins = list(cfg['input_pin'].values()) + list(cfg['inhibit_pin'].values())
+        if self.use_drop_sensor:
+            pins.append(cfg['drop_sensor_pin'])
         if len(pins) != len(set(pins)) or any(pin in (0, 1, 2, 3) for pin in pins):
             raise HardwareFault('GPIO pin conflict or pin reserved for I2C detected.')
         self.maps = {}
@@ -397,8 +421,9 @@ class RealHardware:
                 self.inputs[source] = inp
                 inp.when_activated = self._make_pulse_callback(source)
                 inp.when_deactivated = self.pulses[source].release
-            self.drop_sensor = DigitalInputDevice(cfg['drop_sensor_pin'], pull_up=True)
-            self.drop_sensor.when_activated = self._on_drop
+            if self.use_drop_sensor:
+                self.drop_sensor = DigitalInputDevice(cfg['drop_sensor_pin'], pull_up=True)
+                self.drop_sensor.when_activated = self._on_drop
         except Exception:
             self.close()
             raise
@@ -553,8 +578,7 @@ class RealHardware:
         if not setting or not setting.get('enabled', True):
             raise HardwareFault(f'No calibrated servo for PHP {coin}.')
         channel = int(setting['channel'])
-        home = float(setting['home_angle'])
-        release = float(setting['release_angle'])
+        home, release = servo_angles(self.cfg, setting)
         hold = float(setting.get('hold_seconds', .45))
         settle = float(setting.get('settle_seconds', .3))
         timeout = float(self.cfg.get('drop_timeout_seconds', 2.0))
@@ -574,6 +598,12 @@ class RealHardware:
             servo.angle = release
             time.sleep(hold)
             servo.angle = home
+            if not self.use_drop_sensor:
+                # No sensor: trust the servo cycle. inventory.json is the only count.
+                time.sleep(settle)
+                if self.stopping.is_set():
+                    raise HardwareFault('Dispensing interrupted.')
+                return
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 if self.stopping.is_set():

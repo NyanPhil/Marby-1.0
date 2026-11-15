@@ -3,6 +3,7 @@
 No Raspberry Pi, acceptor, network payment service or motor is operated.
 Run: python -m unittest -v test_dmarby_integration.py
 """
+import time
 import copy
 import io
 import json
@@ -94,7 +95,7 @@ class Servo:
     @angle.setter
     def angle(self, value):
         self.history.append(value)
-        if value == 65 and self.kit.on_release:
+        if value in (65, 115) and self.kit.on_release:
             self.kit.on_release(self.channel)
 
     def set_pulse_width_range(self, minimum, maximum):
@@ -188,6 +189,7 @@ class IntegrationTests(unittest.TestCase):
         # Simulation-only fixtures; never save these flags to deployment config.
         self.cfg["inhibit_verified"] = {"bill": True, "coin": True}
         self.cfg["servo_verified"] = {str(c): True for c in (1, 5, 10, 20)}
+        self.cfg["coin_exit_sensor"] = True   # most tests simulate the sensor
         atomic_json(self.cfg["inventory_file"], {str(c): 100 for c in (1, 5, 10, 20)})
         self.clock = Clock()
         self.addCleanup(patch.stopall)
@@ -324,7 +326,7 @@ class IntegrationTests(unittest.TestCase):
     def test_timeout_preserves_customer_credit(self):
         self.bill()
         self.train("bill", 5)
-        self.app.overlay = {"kind": "timeout_money", "deadline": self.clock.now - 1}
+        self.app.overlay = {"kind": "timeout_money", "deadline": time.monotonic() - 1}
         self.app.tick()
         self.assertEqual(self.app.screen, "incident")
         self.assertEqual(self.app.hardware.storage.state["credit"], 50)
@@ -492,6 +494,61 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(self.app.screen, "done")
         self.assertEqual(self.app.hardware.storage.state["status"], "completed")
 
+    def test_clockwise_servos_are_mirrored(self):
+        from coin_changer_hardware import servo_angles
+        for coin, expected in (("1", (0, 65)), ("10", (0, 65)), ("5", (180, 115)), ("20", (180, 115))):
+            self.assertEqual(servo_angles(self.cfg, self.cfg["servos"][coin]), expected, coin)
+        flipped = dict(self.cfg, increasing_angle_turns_clockwise=True)
+        self.assertEqual(servo_angles(flipped, self.cfg["servos"]["20"]), (0, 65))
+        self.assertEqual(servo_angles(flipped, self.cfg["servos"]["1"]), (180, 115))
+        with self.assertRaises(HardwareFault):
+            servo_angles(self.cfg, dict(self.cfg["servos"]["1"], direction="sideways"))
+
+    def test_hundred_peso_payout_moves_clockwise_twenty_servo_mirrored(self):
+        self.bill(100)
+        self.train("bill", 10)
+        self.pay()
+        self.assertEqual(self.app.screen, "done")
+        history = self.app.hardware.kit.servo[0].history       # PHP 20, clockwise
+        self.assertIn(115, history)
+        self.assertNotIn(65, history)
+        self.assertIsNone(history[-1])
+
+    def without_sensor(self):
+        self.app.close()
+        self.cfg["coin_exit_sensor"] = False
+        self.app = Connected(Root(), self.cfg)
+        self.addCleanup(self.app.close)
+        self.app.hardware.kit.on_release = None     # nothing to detect coins
+
+    def test_without_coin_exit_sensor_each_servo_cycle_pays_one_coin(self):
+        self.without_sensor()
+        self.assertIsNone(self.app.hardware.drop_sensor)
+        self.bill()                                  # PHP 50 -> 2 x 20 + 1 x 10
+        self.train("bill", 5)
+        self.pay()
+        self.assertEqual(self.app.screen, "done")
+        saved = json.loads(Path(self.cfg["inventory_file"]).read_text())
+        self.assertEqual((saved["20"], saved["10"]), (98, 99))
+        self.assertEqual(self.app.hardware.storage.state["status"], "completed")
+
+    def test_without_coin_exit_sensor_the_pin_is_not_required(self):
+        self.app.close()
+        cfg = dict(self.cfg, coin_exit_sensor=False)
+        cfg.pop("drop_sensor_pin")
+        app = Connected(Root(), cfg)
+        self.addCleanup(app.close)
+        self.assertIsNone(app.hardware.drop_sensor)
+
+    def test_servos_release_after_paying_out(self):
+        self.bill()
+        self.train("bill", 5)
+        self.pay()
+        self.assertEqual(self.app.screen, "done")
+        for coin in (1, 5, 10, 20):
+            channel = self.cfg["servos"][str(coin)]["channel"]
+            self.assertIsNone(self.app.hardware.kit.servo[channel].angle)
+
     def test_stray_coin_pulse_is_recorded_then_kiosk_keeps_going(self):
         self.app.show("welcome")
         self.train("coin", 1)                       # nobody asked for a coin
@@ -548,10 +605,13 @@ class IntegrationTests(unittest.TestCase):
         self.train("bill", 5)
         self.pay()
         kit = self.app.hardware.kit
-        self.assertIn(65, kit.servo[14].history)  # Proposed PHP 20 tube.
-        self.assertIn(65, kit.servo[12].history)  # Proposed PHP 10 tube.
-        self.assertEqual(kit.servo[14].pulse_limits, (1000, 2000))
-        self.assertEqual(kit.servo[8].history, [])
+        servos = self.cfg["servos"]
+        twenty, ten = servos["20"]["channel"], servos["10"]["channel"]
+        self.assertIn(115, kit.servo[twenty].history)   # PHP 20, clockwise (mirrored)
+        self.assertIn(65, kit.servo[ten].history)       # PHP 10, counterclockwise
+        self.assertEqual(kit.servo[twenty].pulse_limits, (1000, 2000))
+        unused = set(range(16)) - {int(v["channel"]) for v in servos.values()}
+        self.assertTrue(all(kit.servo[ch].history == [] for ch in unused))
 
     def test_negative_payout_counts_are_rejected(self):
         self.bill()

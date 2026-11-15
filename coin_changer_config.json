@@ -35,15 +35,18 @@
     "bill": true,
     "coin": true
   },
+  "coin_exit_sensor": false,
   "drop_sensor_pin": 22,
   "sensor_debounce_seconds": 0.08,
   "drop_timeout_seconds": 2.0,
   "pca9685_address": "0x40",
   "inventory_file": "inventory.json",
   "journal_file": "transaction_state.json",
+  "increasing_angle_turns_clockwise": false,
   "servos": {
     "1": {
       "channel": 5,
+      "direction": "counterclockwise",
       "enabled": true,
       "home_angle": 0,
       "release_angle": 65,
@@ -55,9 +58,10 @@
     },
     "5": {
       "channel": 6,
+      "direction": "clockwise",
       "enabled": true,
-      "home_angle": 180,
-      "release_angle": 115,
+      "home_angle": 0,
+      "release_angle": 65,
       "hold_seconds": 0.45,
       "settle_seconds": 0.3,
       "min_pulse_us": 1000,
@@ -66,6 +70,7 @@
     },
     "10": {
       "channel": 1,
+      "direction": "counterclockwise",
       "enabled": true,
       "home_angle": 0,
       "release_angle": 65,
@@ -77,9 +82,10 @@
     },
     "20": {
       "channel": 0,
+      "direction": "clockwise",
       "enabled": true,
-      "home_angle": 180,
-      "release_angle": 115,
+      "home_angle": 0,
+      "release_angle": 65,
       "hold_seconds": 0.45,
       "settle_seconds": 0.3,
       "min_pulse_us": 1000,
@@ -100,5 +106,5 @@
     20
   ],
   "contact_number": "Contact kiosk staff",
-  "servo_mapping_note": "Clockwise servos (channels 0 and 6) use mirrored angles: home 180, release 115. Counterclockwise (channels 1 and 5): home 0, release 65."
+  "servo_mapping_note": "Angles are written the same for every servo. \"direction\" decides which way each one turns; clockwise ones are mirrored in code. If every servo turns the wrong way, set increasing_angle_turns_clockwise to true."
 }
