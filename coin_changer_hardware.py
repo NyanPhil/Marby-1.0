@@ -592,7 +592,10 @@ class RealHardware:
             raise HardwareFault(f'No coin detected after PHP {coin} servo cycle (possible empty tube/jam).')
         finally:
             try:
-                servo.angle = None if self.stopping.is_set() else home
+                if not self.stopping.is_set():
+                    servo.angle = home
+                    time.sleep(float(setting.get('return_seconds', .25)))  # let the arm reach home
+                servo.angle = None  # stop the PWM signal: the servo goes limp instead of holding
             except Exception:
                 pass
 
