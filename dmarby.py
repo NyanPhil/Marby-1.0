@@ -986,8 +986,7 @@ class Kiosk:
         else:
             back = "pick_bill" if self.flow == "bill" else "pick_coin"
             self.back(self.go(back))
-            label = "Insert bill  →" if self.flow == "bill" else "Insert coins  →"
-            self.edge("right", label, self.to_insert, remaining == 0)
+            self.edge("right", "Next  →", self.to_insert, remaining == 0)
 
     def clear_mix(self):
         self.mix = Counter()
@@ -1120,7 +1119,7 @@ class Kiosk:
             self.edge("right", "Review  →", self.to_review_combine, bool(chosen and chosen[1]))
         else:
             self.back(self.go("have_coins"))
-            self.edge("right", "Insert coins  →", self.start_combine_insert, bool(chosen and chosen[1]))
+            self.edge("right", "Next  →", self.start_combine_insert, bool(chosen and chosen[1]))
 
     def choose_combine(self, i):
         self.combine_choice = i
