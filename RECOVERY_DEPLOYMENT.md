@@ -71,3 +71,77 @@ If you use `--config /path/to/machine.json` to launch the kiosk, pass that same 
 ## Testing
 
 The included project tests passed **55 of 55** on a simulated Tkinter/GPIO/servo backend. This is not a test on your actual Raspberry Pi, acceptors, servo gates, or physical cash inventory.
+
+## Email update for the revised coin-only UI
+
+This update preserves the current UI, name keyboard, refund option, coin-only
+cash-in, 3% fee deducted from inserted coins, and 20-second receipt display.
+For example PHP 30 inserted means PHP 29 cash-in and PHP 1 rounded-up fee.
+Only replace `dmarby.py` and `dmarby_integration.py` for runtime email support.
+Use those exact filenames on the Pi, without download suffixes such as `(1)`.
+Keep the uploaded hardware code, configuration, inventory, transaction database,
+and logs. Email code lives in the existing integration file, and queue/request
+tables use the existing `transaction_numbers.sqlite3`. No extra module or `.env`
+file is required. The updated test file is optional for operation.
+
+Sender: dmarbyofficial@gmail.com
+Recipient: bagotsay.christianphillip2187@gmail.com
+
+Enable 2-Step Verification on the sender account and generate an App Password at
+https://myaccount.google.com/apppasswords (account settings may affect availability).
+Enter it privately in the terminal used to launch the kiosk:
+
+```bash
+read -rsp 'Gmail App Password: ' DMARBY_SMTP_APP_PASSWORD
+printf '\n'
+export DMARBY_SMTP_APP_PASSWORD
+bash run_marby.sh
+```
+
+The normal Gmail password is not used. This variable lasts for the current shell
+session. Autostart needs the same variable configured privately in its existing
+service environment. No credential is included in these files. If credentials
+are absent or the connection fails, messages stay queued; configure and verify
+email delivery before accepting customer cash.
+
+Paid requests include the full GCash account name and mobile number, inserted
+coins, fee, net cash-in amount, transaction reference and Manila timestamp.
+Requests and their emails are saved together before closing the cash journal.
+The receipt remains a pending manual cash-in; staff must make the actual transfer.
+No email is sent for a cancelled/refunded cash-in request. System alerts are also
+queued, with repeat redraws deduplicated. Progress spinners and the refund-choice
+confirmation are not treated as fault alerts.
+
+Emails retry in a background thread while the kiosk runs and survive restart.
+SMTP acknowledgment loss can still cause a repeated email: check transaction
+references before transferring money. Demo mode creates no actionable email
+requests unless DMARBY_EMAIL_DEMO=1 is explicitly set. Never fulfill demo requests.
+
+The admin website is still separate. Staff can list and mark manual requests
+using the existing integration file:
+
+```bash
+.venv/bin/python dmarby_integration.py pending
+.venv/bin/python dmarby_integration.py complete --ref 123 --operator "Christian" --gcash-reference "ACTUAL_GCASH_REFERENCE"
+```
+
+Replace the example references. Type COMPLETED only after checking the real
+transfer. This records completion; it does not send funds. The requests table
+stores completion separately from the existing pending transaction log.
+To retry queued email manually, stop the kiosk without interrupting cash intake,
+set the App Password as above and run:
+
+```bash
+.venv/bin/python dmarby_integration.py send-pending
+```
+
+Do not run two email workers together. Check the recipient's inbox and spam
+folder. No live email or hardware tests were performed during this update.
+Seven notification-specific tests passed. The broader current suite has three
+unresolved checks (servo-channel fixture, timeout clock fixture, and recovery
+startup expectation); the earlier 55/55 statement above is not the result of this
+update. Run the updated tests with canonical filenames in place:
+
+```bash
+.venv/bin/python -m unittest -v test_dmarby_integration.EmailIntegrationTests test_dmarby_integration.OutboxTests
+```

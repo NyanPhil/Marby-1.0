@@ -617,6 +617,28 @@ class Kiosk:
         self.overlay = overlay
         self.redraw()
 
+    def notification_store(self):
+        from dmarby_integration import Notifications
+        if not hasattr(self, "notifications"):
+            self.notifications = Notifications(os.path.join(os.path.dirname(LOG_FILE), "transaction_numbers.sqlite3"))
+        return self.notifications
+
+    def notify_alert(self):
+        # Demo alerts stay local unless the operator explicitly opts into emails.
+        if DEMO_MODE and os.environ.get("DMARBY_EMAIL_DEMO") != "1":
+            return
+        import uuid
+        if not hasattr(self, "_notification_session"):
+            self._notification_session = uuid.uuid4().hex
+        info = self.incident_info if self.screen == "incident" else {}
+        kind = self.overlay["kind"] if self.overlay else self.notice if self.screen == "insert" else self.screen
+        ref = info.get("ref") or self.transaction_ref
+        key = "alert:" + str(ref or self._notification_session + str(self.screen_since)) + ":" + str(kind)
+        from dmarby_integration import now
+        self.notification_store().enqueue(key, "Kiosk alert: " + str(kind),
+            {"alert": kind, "reference": ref, "balance_received": self.credit,
+             "incident": info, "time": now(), "mode": "demo" if DEMO_MODE else "hardware"})
+
     def redraw(self):
         self.c.delete("all")
         self.shape_refs.clear()
@@ -629,6 +651,17 @@ class Kiosk:
             self.actions = []
             self.c.create_image(0, 0, image=self.img["dim"], anchor="nw")
             getattr(self, "o_" + self.overlay["kind"])()
+        alert_overlay = self.overlay and self.overlay["kind"] in (
+            "timeout_empty", "timeout_money", "gc_balance")
+        alert_screen = not self.overlay and (
+            self.screen in ("incident", "out_of_coins", "gc_unavailable", "gc_error", "wrong_bill")
+            or (self.screen == "insert" and self.notice))
+        if alert_overlay or alert_screen:
+            try:
+                self.notify_alert()
+            except Exception:
+                print("Alert email could not be queued; inspect local storage.", file=sys.stderr)
+
 
     def go(self, screen):
         return lambda: self.show(screen)
@@ -1228,7 +1261,18 @@ class Kiosk:
         self.c.create_line(x1 + 40, y1 + 222, x2 - 40, y1 + 222, fill=LIGHT, width=2)
         self.t(cx, y1 + 266, self.tr("We can't give bills back, so let's turn") +
                f"\n{self.tr('your')} {money(value)} " + self.tr("into coins instead."), 16, True, BLUE)
+        self.t(W / 2, 376, "Returning home keeps your cash recorded for staff assistance.",
+               13, False, SOFT)
+        self.edge("left", "Back to Home", self.wrong_bill_home, w=240)
         self.edge("right", "Choose coins  →", self.reroute_bill, w=280)
+
+    def wrong_bill_home(self):
+        """Leave the wrong-bill screen without losing the customer's balance."""
+        if self.screen != "wrong_bill" or self.overlay or self.credit <= 0:
+            return False
+        self.incident("home_cancelled", self.credit)
+        self.exit_incident()
+        return True
 
     def reroute_bill(self):
         if not payable(self.credit, self.stock):
@@ -1406,7 +1450,7 @@ class Kiosk:
         self.incident_info = dict(kind=kind, amount=amount, ref=ref,
                                   bill=next((v for k, v in self.inserted if k == "bill"), None))
         self.incident_info.update(details)
-        if kind == "jam":
+        if kind in ("jam", "home_cancelled"):
             self.fault = self.incident_info
         self.show("incident", None)
 
@@ -1444,6 +1488,11 @@ class Kiosk:
             head = self.tr("Service required")
             sub = (f"Recorded balance: {money(info['amount'])}" if info["amount"]
                    else self.tr("Please ask staff to check your cash."))
+            recorded = self.tr("This is recorded. Contact us at")
+        elif info["kind"] == "home_cancelled":
+            self.alert(cx, y1 + 48, 22, AMBER, AMBER_SOFT)
+            head = self.tr("Exchange stopped")
+            sub = f"{self.tr('We still owe you')} {money(info['amount'])}."
             recorded = self.tr("This is recorded. Contact us at")
         else:
             self.alert(cx, y1 + 48, 22, RED, "#FEE2E2")
@@ -1665,9 +1714,27 @@ class Kiosk:
             return False
         return self.cashing_result(True)
 
+    def queue_gcash_request(self):
+        """Persist the request and its email before the cash journal closes."""
+        from dmarby_integration import now
+        self.gc_ref = self.ensure_reference()
+        if DEMO_MODE and os.environ.get("DMARBY_EMAIL_DEMO") != "1":
+            return
+        self.notification_store().request({
+            "reference": self.gc_ref, "account_name": self.gc_name,
+            "number": self.gc_number_buf, "amount": self.gc_amount, "fee": self.gc_fee,
+            "cash_received": self.credit, "time": now(),
+            "mode": "demo" if DEMO_MODE else "hardware"})
+
     def cashing_result(self, ok):
         """No GCash API: save the request so staff can send it manually."""
         if not ok or self.screen != "insert" or self.flow != "gcash" or self.fault:
+            return False
+        try:
+            self.queue_gcash_request()
+        except Exception:
+            self.notice = "Request could not be saved. Please contact kiosk staff."
+            self.show("insert")
             return False
         self.gcash_balance -= self.gc_amount
         self.gc_ref = self.ensure_reference()
@@ -1953,6 +2020,8 @@ class Kiosk:
         if self.closed:
             return
         self.closed = True
+        if hasattr(self, "notifications"):
+            self.notifications.stop.set()
         for job in self.jobs.values():
             try:
                 self.root.after_cancel(job)
@@ -1995,6 +2064,8 @@ def main(argv=None):
             app = ConnectedKiosk(root, cfg)
         else:
             app = Kiosk(root)
+        if not DEMO_MODE or os.environ.get("DMARBY_EMAIL_DEMO") == "1":
+            app.notification_store().start()
         root.mainloop()
         if not app.closed:
             app.close()

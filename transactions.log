@@ -13,3 +13,8 @@
 {"time": "2026-11-15 15:39:16", "mode": "demo", "kind": "refund", "flow": "gcash", "amount": 20, "plan": {"20": 1}, "ref": "000014"}
 {"time": "2026-11-15 15:39:35", "mode": "demo", "kind": "gcash", "status": "pending", "amount": 9, "fee": 1, "received": 10, "number": "0966 *** 6666", "ref": "000015"}
 {"time": "2026-11-15 15:53:19", "mode": "demo", "kind": "gcash", "status": "pending", "amount": 9, "fee": 1, "received": 10, "number": "0999 *** 9999", "ref": "000016"}
+{"time": "2026-11-15 16:14:36", "mode": "demo", "kind": "gcash", "status": "pending", "amount": 19, "fee": 1, "received": 20, "number": "0999 *** 9999", "ref": "000018"}
+{"time": "2026-11-15 16:50:05", "mode": "demo", "kind": "gcash", "status": "pending", "amount": 9, "fee": 1, "received": 10, "number": "0988 *** 8888", "ref": "000019"}
+{"time": "2026-11-15 16:54:44", "mode": "demo", "kind": "exchange", "flow": "bill", "amount": 100, "plan": {"1": 100}, "ref": "000020"}
+{"time": "2026-11-15 16:55:56", "mode": "demo", "kind": "exchange", "flow": "bill", "amount": 100, "plan": {"20": 5}, "ref": "000021"}
+{"time": "2026-11-15 17:01:05", "mode": "demo", "kind": "incident", "type": "home_cancelled", "owed": 100, "flow": "bill", "inserted": [["bill", 100]], "ref": "000022"}

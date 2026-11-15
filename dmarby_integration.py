@@ -8,7 +8,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from coin_changer_hardware import HardwareFault, RealHardware, payout_coins_for
+from coin_changer_hardware import HardwareFault, RealHardware, payout_coins_for, atomic_json
 
 
 def load_config(filename):
@@ -44,6 +44,14 @@ class KioskHardwareMixin:
             self.stock = self._stock_from_backend()
             # Team GCash wallet balance available for manual sends (config, default PHP 2,000).
             self.gcash_balance = int(cfg.get("gcash_float", 2000))
+            state = self.hardware.storage.state
+            if state.get("status") == "paid":
+                request = self.notification_store().get_request(state.get("reference", ""))
+                if (request and not self.hardware.input_pending()
+                        and not self.hardware._input_fault
+                        and not any(inp.is_active for inp in self.hardware.inputs.values())):
+                    self.hardware.storage.complete_transfer(request["amount"], request["fee"])
+                    self.hardware.stopping.clear()
             if self.hardware.storage.unresolved:
                 self._show_saved_incident()
             else:
@@ -149,6 +157,10 @@ class KioskHardwareMixin:
         # before applying frontend target/flow restrictions.
         try:
             self.hardware.storage.receive(source, value, flow=self.flow)
+            if self.flow == "gcash":
+                self.hardware.storage.state["gcash_customer"] = {
+                    "name": self.gc_name, "number": self.gc_number_buf}
+                atomic_json(self.hardware.storage.path, self.hardware.storage.state)
         except HardwareFault as exc:
             self.hardware.storage.state.setdefault("uncredited_inputs", []).append(
                 {"source": source, "value": value, "time": time.time()})
@@ -327,6 +339,10 @@ class KioskHardwareMixin:
         if self.gc_amount <= 0:
             return False
         try:
+            self.hardware.set_acceptance(None)
+            if self.hardware.input_pending():
+                return False
+            self.queue_gcash_request()
             self.hardware.complete_transfer(self.gc_amount, self.gc_fee)
             self._deposit_open = None
         except Exception as exc:
@@ -384,3 +400,272 @@ class KioskHardwareMixin:
             self._executor.shutdown(wait=False, cancel_futures=True)
             self.hardware.close()
             super().close()
+
+
+# Email queue and staff tools live here to keep deployment in existing files.
+"""Durable manual GCash requests and retrying Gmail outbox (standard library)."""
+import argparse
+import json
+import os
+import smtplib
+import sqlite3
+import ssl
+import threading
+import time
+from datetime import datetime
+from email.message import EmailMessage
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+SENDER = 'frijmagpulong@gmail.com'
+RECIPIENT = 'bagotsay.christianphillip2187@gmail.com'
+
+def configured():
+    return bool(os.environ.get('DMARBY_SMTP_APP_PASSWORD', '').strip())
+
+def format_admin_email(subject, body):
+    """Render stored payloads at send time, including previously queued JSON."""
+    from html import escape
+    from datetime import timezone, timedelta
+    try:
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        data = None
+    if not isinstance(data, dict):
+        return subject, body, None
+
+    def clean(value):
+        return str(value if value is not None else "Not recorded")
+
+    def peso(value):
+        try:
+            return f"₱{float(value):,.2f}"
+        except (ValueError, TypeError):
+            return clean(value)
+
+    def date_label(value):
+        try:
+            date = datetime.fromisoformat(str(value))
+            if date.tzinfo is not None:
+                date = date.astimezone(timezone(timedelta(hours=8)))
+                return date.strftime("%d %B %Y, %I:%M:%S %p") + " (Philippine time)"
+            return clean(value)
+        except (ValueError, TypeError):
+            return clean(value)
+
+    is_demo = data.get("mode") == "demo"
+    is_request = all(field in data for field in ("account_name", "number", "amount", "cash_received"))
+    reference = clean(data.get("reference") or data.get("incident", {}).get("ref") or "Not recorded")
+    if is_request:
+        title = "Manual GCash cash-in request"
+        status = "DEMO — DO NOT TRANSFER MONEY" if is_demo else "PENDING — MANUAL TRANSFER REQUIRED"
+        lead = "This is a test request. Do not send money." if is_demo else "Please manually send the cash-in amount to the account below."
+        rows = [
+            ("Transaction reference", reference),
+            ("GCash account name", clean(data.get("account_name"))),
+            ("GCash mobile number", clean(data.get("number"))),
+            ("Amount to send", peso(data.get("amount"))),
+            ("Cash received by kiosk", peso(data.get("cash_received"))),
+            ("Service fee retained", peso(data.get("fee"))),
+            ("Requested at", date_label(data.get("time"))),
+            ("Mode", "Demo / test" if is_demo else clean(data.get("mode", "hardware")).title()),
+        ]
+        action = ("Do not fulfill this demo request." if is_demo else
+                  "Check that this reference has not already been processed. Transfer only the amount to send, excluding the service fee. After verifying the transfer, record completion and the actual GCash transaction reference.")
+        note = "This email is a cash-in request, not proof of a completed GCash transfer."
+        subject = f"[D’ MARBY]{' [DEMO]' if is_demo else ''} GCash request {reference} — {peso(data.get('amount'))}"
+    else:
+        title = "Kiosk alert"
+        status = "DEMO ALERT — TEST ONLY" if is_demo else "STAFF ATTENTION REQUIRED"
+        labels = {"timeout_empty": "Customer inactive — no cash inserted",
+                  "timeout_money": "Customer inactive — cash remains in the kiosk",
+                  "out_of_coins": "Insufficient coins", "wrong_bill": "Different bill inserted",
+                  "gc_unavailable": "GCash service unavailable", "gc_balance": "Insufficient GCash float",
+                  "gc_error": "GCash request error", "incident": "Transaction needs staff review"}
+        alert = clean(data.get("alert", "Kiosk alert"))
+        description = labels.get(alert, alert.replace("_", " "))
+        lead = "Please review the kiosk and any recorded customer balance."
+        rows = [("Alert", description), ("Transaction reference", reference),
+                ("Cash received / recorded credit", peso(data.get("balance_received", 0))),
+                ("Reported at", date_label(data.get("time"))),
+                ("Mode", "Demo / test" if is_demo else clean(data.get("mode", "hardware")).title())]
+        incident = data.get("incident")
+        if isinstance(incident, dict):
+            names = {"kind": "Incident type", "amount": "Balance owed to customer", "detail": "Details",
+                     "bill": "Bill received", "picked_bill": "Bill selected", "excess": "Excess payment"}
+            for field, label in names.items():
+                if incident.get(field) is not None:
+                    value = peso(incident[field]) if field in ("amount", "bill", "picked_bill", "excess") else clean(incident[field])
+                    rows.append((label, value))
+        action = "Review the transaction journal and physically verify cash before resolving the incident. Returning home does not settle an outstanding balance."
+        note = "Use the transaction reference to avoid processing the same incident twice."
+        subject = f"[D’ MARBY]{' [DEMO]' if is_demo else ''} Alert — {description} — Ref {reference}"
+
+    subject = subject.replace("\r", " ").replace("\n", " ")
+    plain = title + "\n" + status + "\n\n" + lead + "\n\n"
+    plain += "\n".join(label + ": " + value for label, value in rows)
+    plain += "\n\nAdmin action\n" + action + "\n\n" + note + "\n"
+    colour = "#92400e" if is_demo else "#1d3fbf"
+    rendered_rows = "".join(
+        '<tr><th style="padding:12px 16px;text-align:left;border-bottom:1px solid #e3e8f2;color:#5b6b8c;font-weight:normal;width:43%">'
+        + escape(label) + '</th><td style="padding:12px 16px;border-bottom:1px solid #e3e8f2;color:#0f1b4d;'
+        + ('font-size:22px;font-weight:bold;' if label == 'Amount to send' else 'font-size:16px;')
+        + '">' + escape(value) + '</td></tr>' for label, value in rows)
+    html = ('<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0;background:#eef2fb;font-family:Arial,sans-serif;line-height:1.5">'
+            '<div style="max-width:620px;margin:24px auto;background:#ffffff;border-radius:12px;overflow:hidden">'
+            '<div style="padding:24px;background:#0f1b4d;color:white"><div style="font-size:14px;letter-spacing:2px">D’ MARBY</div>'
+            '<h1 style="font-size:24px;margin:8px 0 0">' + escape(title) + '</h1></div>'
+            '<div style="padding:24px"><p style="font-size:14px;font-weight:bold;color:' + colour + '">' + escape(status) + '</p>'
+            '<p>' + escape(lead) + '</p><table style="width:100%;border-collapse:collapse;background:#f8fafc">'
+            + rendered_rows + '</table><h2 style="font-size:18px;margin-top:24px">Admin action</h2><p>' + escape(action) + '</p>'
+            '<p style="font-size:13px;color:#5b6b8c;border-top:1px solid #e3e8f2;padding-top:16px">' + escape(note) + '</p>'
+            '</div></div></body></html>')
+    return subject, plain, html
+
+
+class Notifications:
+    def __init__(self, path):
+        self.path = str(path)
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with self.connect() as db:
+            db.executescript('''CREATE TABLE IF NOT EXISTS outbox (
+                id TEXT PRIMARY KEY, subject TEXT NOT NULL, body TEXT NOT NULL,
+                sent INTEGER DEFAULT 0, attempts INTEGER DEFAULT 0, next_try REAL DEFAULT 0);
+                CREATE TABLE IF NOT EXISTS requests (
+                ref TEXT PRIMARY KEY, details TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+                operator TEXT, provider_ref TEXT, completed_at TEXT);''')
+        # Import records if the earlier optional email module was already installed.
+        # Existing transaction-number tables are kept intact.
+        legacy = Path(self.path).with_name('notifications.sqlite3')
+        with self.connect() as db:
+            db.execute('CREATE TABLE IF NOT EXISTS notification_migrations (name TEXT PRIMARY KEY)')
+            migrated = db.execute("SELECT 1 FROM notification_migrations WHERE name='legacy_outbox'").fetchone()
+            if legacy.exists() and legacy.resolve() != Path(self.path).resolve() and not migrated:
+                with sqlite3.connect(legacy.resolve().as_uri()+'?mode=ro', uri=True) as old:
+                    for table, columns in (
+                        ('outbox', 'id,subject,body,sent,attempts,next_try'),
+                        ('requests', 'ref,details,status,operator,provider_ref,completed_at')):
+                        rows = old.execute('SELECT '+columns+' FROM '+table).fetchall()
+                        db.executemany('INSERT OR IGNORE INTO '+table+'('+columns+') VALUES(?,?,?,?,?,?)', rows)
+                db.execute("INSERT INTO notification_migrations(name) VALUES('legacy_outbox')")
+        os.chmod(self.path, 0o600)
+        self.stop = threading.Event()
+        self.thread = None
+
+    def connect(self):
+        return sqlite3.connect(self.path, timeout=10)
+
+    def enqueue(self, key, subject, details):
+        body = json.dumps(details, ensure_ascii=False, indent=2)
+        with self.connect() as db:
+            db.execute('INSERT OR IGNORE INTO outbox(id,subject,body) VALUES(?,?,?)',
+                       (key, '[D’ MARBY] '+subject, body))
+
+    def request(self, details):
+        ref = details['reference']
+        if (not details.get('account_name', '').strip() or
+                len(details.get('number', '')) != 11 or not details['number'].startswith('09') or
+                not 0 < details['amount'] < 100 or
+                details['cash_received'] != details['amount'] + details['fee']):
+            raise ValueError('Invalid or unpaid GCash request')
+        with self.connect() as db:
+            previous = db.execute('SELECT details FROM requests WHERE ref=?', (ref,)).fetchone()
+            if previous:
+                existing = json.loads(previous[0])
+                details = dict(details, time=existing.get('time')) if 'time' in existing else details
+                if existing != details:
+                    raise ValueError('Reference already belongs to a different request')
+            body = json.dumps(details, ensure_ascii=False, indent=2)
+            db.execute('INSERT OR IGNORE INTO requests(ref,details) VALUES(?,?)', (ref,body))
+            db.execute('INSERT OR IGNORE INTO outbox(id,subject,body) VALUES(?,?,?)',
+                       ('gcash:'+ref, '[D’ MARBY] Manual GCash cash-in request '+ref, body))
+
+    def get_request(self, ref):
+        with self.connect() as db:
+            row = db.execute('SELECT details FROM requests WHERE ref=?', (ref,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def has_request(self, ref):
+        with self.connect() as db:
+            return bool(db.execute('SELECT 1 FROM requests WHERE ref=?', (ref,)).fetchone())
+
+    def deliver_one(self):
+        if not configured():
+            return False
+        with self.connect() as db:
+            row = db.execute('SELECT id,subject,body FROM outbox WHERE sent=0 AND next_try<=? ORDER BY rowid LIMIT 1', (time.time(),)).fetchone()
+        if not row:
+            return False
+        key, subject, body = row
+        subject, plain_body, html_body = format_admin_email(subject, body)
+        message = EmailMessage()
+        message['From'], message['To'], message['Subject'] = SENDER, RECIPIENT, subject
+        import hashlib
+        message['Message-ID'] = '<'+hashlib.sha256(key.encode()).hexdigest()+'@dmarby.local>'
+        message.set_content(plain_body)
+        if html_body:
+            message.add_alternative(html_body, subtype="html")
+        try:
+            with smtplib.SMTP_SSL('smtp.gmail.com',465,timeout=15,context=ssl.create_default_context()) as smtp:
+                smtp.login(SENDER, os.environ['DMARBY_SMTP_APP_PASSWORD'].replace(' ',''))
+                smtp.send_message(message)
+        except Exception:
+            # Never log credentials, customer details or SMTP exception payloads.
+            with self.connect() as db:
+                db.execute('UPDATE outbox SET attempts=attempts+1,next_try=? WHERE id=?', (time.time()+60,key))
+            return False
+        with self.connect() as db:
+            db.execute('UPDATE outbox SET sent=1,attempts=attempts+1 WHERE id=?', (key,))
+        return True
+
+    def start(self):
+        if self.thread:
+            return
+        def run():
+            while not self.stop.is_set():
+                try:
+                    sent = self.deliver_one()
+                except Exception:
+                    sent = False
+                self.stop.wait(1 if sent else 10)
+        self.thread = threading.Thread(target=run,daemon=True,name='marby-email')
+        self.thread.start()
+
+
+def now():
+    return datetime.now(ZoneInfo('Asia/Manila')).isoformat(timespec='seconds')
+
+
+def notification_main():
+    parser=argparse.ArgumentParser(description='Local staff tool; never transfers GCash automatically.')
+    parser.add_argument('--db',default=str(Path(__file__).with_name('transaction_numbers.sqlite3')))
+    sub=parser.add_subparsers(dest='command',required=True)
+    sub.add_parser('pending')
+    done=sub.add_parser('complete')
+    done.add_argument('--ref',required=True); done.add_argument('--operator',required=True)
+    done.add_argument('--gcash-reference',required=True)
+    sub.add_parser('send-pending')
+    a=parser.parse_args(); store=Notifications(a.db)
+    if a.command=='pending':
+        with store.connect() as db:
+            for row in db.execute("SELECT ref,details FROM requests WHERE status='pending'"):
+                print(row[0],row[1])
+    elif a.command=='complete':
+        if input('After verifying the real transfer, type COMPLETED: ').strip()!='COMPLETED':
+            raise SystemExit('No change made.')
+        with store.connect() as db:
+            result=db.execute("UPDATE requests SET status='completed',operator=?,provider_ref=?,completed_at=? WHERE ref=? AND status='pending'",(a.operator,a.gcash_reference,now(),a.ref))
+            if result.rowcount!=1:
+                raise SystemExit('Pending reference not found; no change made.')
+        print('Recorded manual completion; no funds transferred by this command.')
+    else:
+        if not configured():
+            raise SystemExit('Set DMARBY_SMTP_APP_PASSWORD first.')
+        while store.deliver_one():
+            pass
+        with store.connect() as db:
+            count=db.execute('SELECT count(*) FROM outbox WHERE sent=0').fetchone()[0]
+        print('Remaining queued emails:',count)
+
+if __name__=='__main__':
+    notification_main()
