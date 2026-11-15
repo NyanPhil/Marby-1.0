@@ -420,6 +420,16 @@ from zoneinfo import ZoneInfo
 SENDER = 'frijmagpulong@gmail.com'
 RECIPIENT = 'bagotsay.christianphillip2187@gmail.com'
 
+_password_file = Path.home() / ".config" / "dmarby" / "smtp_password"
+
+if not os.environ.get("DMARBY_SMTP_APP_PASSWORD"):
+    try:
+        os.environ["DMARBY_SMTP_APP_PASSWORD"] = (
+            _password_file.read_text(encoding="utf-8").strip()
+        )
+    except FileNotFoundError:
+        pass
+
 def configured():
     return bool(os.environ.get('DMARBY_SMTP_APP_PASSWORD', '').strip())
 
