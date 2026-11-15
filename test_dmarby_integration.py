@@ -346,11 +346,73 @@ class IntegrationTests(unittest.TestCase):
         self.assertFalse(self.app.coin_dropped(20))
         self.assertEqual(self.app.credit, 0)
 
-    def test_gcash_is_blocked_before_real_cash_entry(self):
+    def gcash(self):
         self.app.start_gcash()
-        self.assertEqual(self.app.screen, "gc_unavailable")
-        self.assertIsNone(self.app.hardware.accepting)
+        for digit in "09171234567":
+            self.app.gc_number_digit(digit)
+        self.app.gc_number_next()
+        for ch in "JUAN DELA CRUZ":
+            self.app.gc_name_type(ch)
+        self.app.gc_name_next()
+
+    def reference(self, ref):
+        import sqlite3
+        row = sqlite3.connect(self.folder / "transaction_numbers.sqlite3").execute(
+            "SELECT kind, status, details FROM transactions WHERE number=?", (int(ref),)).fetchone()
+        return row[0], row[1], json.loads(row[2])
+
+    def test_gcash_accepts_coins_only(self):
+        self.gcash()
+        self.assertEqual(self.app.screen, "insert")
+        self.assertEqual(self.app.hardware.accepting, "coin")
         self.assertFalse(self.app.cashing_result(True))
+        self.assertNotEqual(self.app.screen, "gc_success")
+
+    def test_gcash_cash_in_closes_journal_and_saves_pending_request(self):
+        self.gcash()
+        self.train("coin", 20)
+        self.train("coin", 10)
+        self.assertEqual(self.app.credit, 30)
+        self.app.start_cashing()
+        self.assertEqual(self.app.screen, "gc_success")
+        self.assertEqual((self.app.gc_amount, self.app.gc_fee), (29, 1))
+        state = self.app.hardware.storage.state
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(state["outcome"], "gcash_pending")
+        self.assertEqual(state["dispensed"], {})
+        self.assertFalse(self.app.hardware.storage.unresolved)
+        self.assertIsNone(self.app.hardware.accepting)
+        kind, status, details = self.reference(self.app.gc_ref)
+        self.assertEqual((kind, status), ("gcash", "pending"))
+        self.assertEqual((details["number"], details["name"], details["amount"]),
+                         ("09171234567", "JUAN DELA CRUZ", 29))
+        self.app.show("welcome")
+        self.bill()
+        self.assertEqual(self.app.hardware.accepting, "bill")
+
+    def test_gcash_cancel_returns_the_same_coins(self):
+        self.gcash()
+        self.train("coin", 10)
+        self.train("coin", 10)
+        before = self.app.hardware.storage.inventory["10"]
+        self.app.ask_cancel()
+        self.app.cancel_gcash()
+        self.assertEqual(self.app.screen, "dispensing")
+        for _ in range(110):
+            self.app._hardware_tick()
+            if self.app.fault or self.app.dropped == len(self.app.queue):
+                break
+        self.app.finish_dispense()
+        self.assertEqual(self.app.screen, "done")
+        self.assertEqual(self.app.hardware.storage.state["dispensed"], {"10": 2})
+        self.assertEqual(self.app.hardware.storage.inventory["10"], before - 2)
+        self.assertEqual(self.reference(self.app.transaction_ref)[1], "refunded")
+
+    def test_gcash_cannot_cash_in_coins_already_in_another_state(self):
+        self.gcash()
+        self.train("coin", 5)
+        self.app.hardware.storage.fault("simulated jam")
+        self.assertFalse(self.app.start_cashing())
         self.assertNotEqual(self.app.screen, "gc_success")
 
     def test_demo_admin_controls_cannot_clear_hardware_journal(self):

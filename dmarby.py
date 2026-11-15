@@ -6,8 +6,9 @@ Hardware: python dmarby.py --hardware --windowed
 Hardware mode uses dmarby_integration.py and coin_changer_hardware.py.
 It requires verified acceptance control, calibrated dispensers and a coin-exit
 sensor. Bill pulses: 5=PHP 50, 10=PHP 100; coin pulses: 1/5/10/20=PHP 1/5/10/20.
-GCash is simulated in demo mode and unavailable for real cash until a real
-transfer integration is supplied. Hardware transactions never auto-forfeit
+GCash has no API: the kiosk takes coins, saves the number and account name
+as a "pending" request, and staff send the money manually (both modes).
+Cancelling returns the coins. Hardware transactions never auto-forfeit
 accepted cash on timeout. Existing transaction logs are append-only.
 """
 
@@ -43,19 +44,21 @@ BILLS = [50, 100]
 COINS = [20, 10, 5, 1]
 START_STOCK = {20: 60, 10: 80, 5: 100, 1: 200}
 GCASH_START_BALANCE = 2000
-GCASH_FEE_RATE = 0.05
+GCASH_FEE_RATE = 0.03
+GCASH_MAX_INSERT = 100           # GCash takes coins only, up to this total
 GCASH_MAX = 5000
 
 CHECK_BILL_MS = 1500             # "Checking your bill" overlay
 CHECK_COIN_MS = 450              # quick "Counting your coin" flash
 COIN_DROP_MS = 140               # simulated hopper speed
-CASHING_MS = 2500                # simulated GCash transfer
+GC_DONE_S = 20                   # time to photograph the GCash receipt
 IDLE_EMPTY_S = 45                # no taps, no money -> prompt
 IDLE_MONEY_S = 75                # no taps, money inside -> prompt
 PROMPT_S = 15                    # countdown on both prompts
 DONE_S = 8
 AUTO_HOME_S = 60                 # incident and out-of-coins screens
 ADMIN_TAPS = 5
+SAFE_SCREENS = ("welcome", "paused", "contact")   # no money handled on these
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(BASE_DIR, "transactions.log")
@@ -251,7 +254,7 @@ class Kiosk:
         self.lang = "en"
         self.stock = dict(START_STOCK)
         self.gcash_balance = GCASH_START_BALANCE
-        self.demo = {"reject": False, "jam": False, "bad_number": False}
+        self.demo = {"reject": False, "jam": False}
         self.fault = None
         self.incident_dismissed = False
         self.taps = []
@@ -321,7 +324,8 @@ class Kiosk:
         self.gc_number_buf = ""
         self.gc_amount = 0
         self.gc_fee = 0
-        self.gc_reentry = False
+        self.gc_name_buf = ""
+        self.gc_name = ""
         self.gc_ref = ""
         self.transaction_ref = ""
         self.dropped = 0
@@ -603,7 +607,7 @@ class Kiosk:
     def show(self, screen, overlay=None):
         if self.closed:
             return
-        if screen != "welcome":
+        if screen not in SAFE_SCREENS:
             self.incident_dismissed = False
         if screen != self.screen:
             self.screen_since = time.monotonic()
@@ -648,7 +652,7 @@ class Kiosk:
             for dx, dy in stroke:
                 self.t(W / 2 + dx, y + dy, text, px, True, WHITE)
         self.edge("left", "Contact us", self.go("contact"), w=212)
-        self.edge("right", "Start", self.go("incident" if self.fault else "exchange_type"), w=212)
+        self.edge("right", "Start", self.go("paused" if self.fault else "exchange_type"), w=212)
 
     def pick_lang(self, lang):
         """Kept for the Cebuano option later; the welcome screen now just says Start."""
@@ -669,6 +673,19 @@ class Kiosk:
         self.c.create_line(x1 + 34, y1 + 222, x2 - 34, y1 + 222, fill=LIGHT, width=2)
         self.t(cx, y1 + 246, self.tr("Have your reference number ready if you have one."), 14, False, GREY)
         self.back(self.go("welcome"))
+
+    def s_paused(self):
+        x1, y1, x2, y2 = 150, 70, 650, 350
+        self.card(x1, y1, x2, y2)
+        cx = W / 2
+        self.alert(cx, y1 + 62, 24, AMBER, AMBER_SOFT)
+        self.t(cx, y1 + 132, self.tr("This machine is paused"), 30, True, INK)
+        self.t(cx, y1 + 170, self.tr("Staff need to check it before the next exchange."), 16, True, GREY)
+        self.c.create_line(x1 + 40, y1 + 200, x2 - 40, y1 + 200, fill=LIGHT, width=2)
+        self.t(cx, y1 + 226, self.tr("Your earlier transaction is saved. Contact us at"), 15, True, GREY)
+        self.t(cx, y1 + 254, CONTACT_NUMBER, 22, True, BLUE)
+        self.back(self.go("welcome"))
+        self.edge("right", "Contact us", self.go("contact"), w=212)
 
     def s_exchange_type(self):
         self.title("What are you exchanging?")
@@ -1032,13 +1049,11 @@ class Kiosk:
             return set()
         if self.flow == "bill":
             return {"bill"}
-        if self.flow in ("break", "combine"):
-            return {"coin"}
-        return {"bill", "coin"}  # GCash demo.
+        return {"coin"}  # break, combine and GCash take coins only
 
     def s_insert(self):
         gc = self.flow == "gcash"
-        label = {"bill": "Insert a bill", "gcash": "Insert money"}.get(self.flow, "Insert coins")
+        label = {"bill": "Insert a bill"}.get(self.flow, "Insert coins")
         self.title(label, 70 if gc else 74, 38 if gc else 40)
         if gc:
             x1, y1, x2, y2 = 170, 112, 630, 362
@@ -1047,7 +1062,7 @@ class Kiosk:
         self.card(x1, y1, x2, y2)
         cx = W / 2
         if gc:
-            self.t(x1 + 30, y1 + 34, self.tr("Cash in"), 17, True, GREY, "w")
+            self.t(x1 + 30, y1 + 34, f"{self.tr('Cash in to')} {self.masked()}", 17, True, GREY, "w")
             self.picture("gcash_logo", x2 - 80, y1 + 34)
             top = y1 + 90
             big_px, small_px = 54, 28
@@ -1055,7 +1070,7 @@ class Kiosk:
             self.t(cx, y1 + 28, self.tr("Inserted"), 17, True, GREY)
             top = y1 + 82
             big_px, small_px = 66, 34
-        big, small = money(self.credit), f" / {money(self.target)}"
+        big, small = money(self.credit), ("" if gc else f" / {money(self.target)}")
         wb, ws = self.measure(big, big_px, True), self.measure(small, small_px, True)
         left = cx - (wb + ws) / 2
         self.t(left, top, big, big_px, True, INK, "w")
@@ -1070,7 +1085,9 @@ class Kiosk:
                    if not self.credit else self.tr("Bill accepted"))
             colour = GREY
         elif gc:
-            sub, colour = self.tr("Bills or coins"), GREY
+            sub = (f"{self.tr('Coins only, up to')} {money(GCASH_MAX_INSERT)}" if not self.credit
+                   else self.tr("Add more coins, or tap Cash in"))
+            colour = GREY
         else:
             n = sum(1 for k, _ in self.inserted if k == "coin")
             sub, colour = (plural(n) if n else self.tr("No coins yet")), GREY
@@ -1085,13 +1102,17 @@ class Kiosk:
             self.pill(x1 + 22, ny - 17, x2 - 22, ny + 17, TINT)
             self.oval(x1 + 36, ny - 9, x1 + 54, ny + 9, fill=BLUE, outline="")
             self.t(x1 + 45, ny, "i", 13, True, WHITE)
-            self.t(x1 + 64, ny, f"{self.tr('Includes 5% fee:')} {money(self.gc_amount)} + {money(self.gc_fee)} "
-                   f"{self.tr('fee')}", 15, True, INK, "w")
+            sent, fee = self.gc_split()
+            note = (f"{money(sent)} {self.tr('to GCash after')} {money(fee)} {self.tr('fee')} ({GCASH_FEE_RATE:.0%})"
+                    if self.credit else f"{GCASH_FEE_RATE:.0%} {self.tr('fee is taken from your coins')}")
+            self.t(x1 + 64, ny, note, 15, True, INK, "w")
         if self.credit == 0 and not counting:
             prev = {"bill": "build_mix", "break": "build_mix", "combine": "combine_choice",
-                    "gcash": "gc_number"}[self.flow]
+                    "gcash": "gc_name"}[self.flow]
             self.back(self.go(prev))
-        done = (self.credit == self.target if gc else self.credit >= self.target) and not counting
+        elif gc and not counting and self.refund_plan():
+            self.edge("left", "Cancel", self.ask_cancel, w=168)
+        done = (self.gc_split()[0] > 0 if gc else self.credit >= self.target) and not counting
         if gc:
             self.edge("right", "Cash in  →", self.start_cashing, done)
         else:
@@ -1150,14 +1171,6 @@ class Kiosk:
             self.notice = self.tr("That bill wasn't accepted. Try another one.")
             self.show("insert")
             return False
-        if self.flow == "gcash":
-            remaining = max(0, self.target - self.credit)
-            self.add_credit("bill", value)
-            if value > remaining:
-                self.incident("overpayment", self.credit)
-            else:
-                self.show("insert")
-            return True
         # Bill to coins
         self.add_credit("bill", value)
         if not payable(value, self.stock):
@@ -1328,11 +1341,18 @@ class Kiosk:
         if self.screen != "dispensing" or not self.queue or self.dropped != len(self.queue):
             return False
         self.ensure_reference()
-        self.references.record(self.transaction_ref, "completed",
-                               {"flow": self.flow, "amount": self.credit, "plan": self.plan})
-        self.log("exchange", flow=self.flow, amount=self.credit, plan=self.plan)
-        self.done_text = (f"{money(self.credit)} {self.tr('exchanged into')} "
-                          f"{plural(sum(self.plan.values()))}")
+        if self.flow == "gcash":
+            self.references.record(self.transaction_ref, "refunded",
+                                   {"flow": self.flow, "amount": self.credit, "plan": self.plan})
+            self.log("refund", flow=self.flow, amount=self.credit, plan=self.plan)
+            self.done_text = (f"{money(self.credit)} {self.tr('returned in')} "
+                              f"{plural(sum(self.plan.values()))}")
+        else:
+            self.references.record(self.transaction_ref, "completed",
+                                   {"flow": self.flow, "amount": self.credit, "plan": self.plan})
+            self.log("exchange", flow=self.flow, amount=self.credit, plan=self.plan)
+            self.done_text = (f"{money(self.credit)} {self.tr('exchanged into')} "
+                              f"{plural(sum(self.plan.values()))}")
         self.show("done")
 
     def s_dispensing(self):
@@ -1440,11 +1460,8 @@ class Kiosk:
         self.t(cx, y1 + 216, CONTACT_NUMBER, 24, True, BLUE)
         self.pill(cx - 128, y1 + 242, cx + 128, y1 + 272, TINT)
         self.t(cx, y1 + 257, f"Ref {info['ref']}", 15, True, INK)
-        self.t(140 if info["kind"] not in ("jam", "hardware") else W / 2, 418, self.tr("Take a photo of this screen."),
-               16, True, SOFT, "center")
-        if info["kind"] not in ("jam", "hardware"):
-            self.edge("right", "Exit  →" if info["kind"] == "wrong_bill_unpayable" else "Done  →",
-                      self.exit_incident, w=200)
+        self.t(170, 418, self.tr("Take a photo of this screen."), 16, True, SOFT, "center")
+        self.edge("right", "Main menu  →", self.exit_incident, w=240)
 
     def exit_incident(self):
         """Dismiss the receipt; hardware debt and the acceptance lock remain."""
@@ -1464,7 +1481,33 @@ class Kiosk:
     def start_gcash(self):
         self.reset_session()
         self.flow = "gcash"
-        self.show("gc_amount")
+        self.show("gc_number")
+
+    def gc_split(self):
+        """The fee comes out of the inserted coins; the rest is sent."""
+        fee = math.ceil(self.credit * GCASH_FEE_RATE)
+        return max(0, self.credit - fee), fee
+
+    def refund_plan(self):
+        """Coins to give back if a GCash cash-in is cancelled, or None."""
+        if self.credit <= 0:
+            return None
+        same = dict(Counter(v for k, v in self.inserted if k == "coin"))
+        if fits(same, self.stock):
+            return same          # give back the same coins they put in
+        return fewest_plan(self.credit, self.stock)
+
+    def ask_cancel(self):
+        self.show("insert", {"kind": "gc_cancel"})
+
+    def cancel_gcash(self):
+        plan = self.refund_plan()
+        if not plan:
+            self.notice = self.tr("Can't return coins right now. Tap Cash in or contact us.")
+            self.show("insert")
+            return
+        self.plan = plan
+        self.start_dispense()
 
     def keypad(self, on_digit, on_clear, on_back):
         x1, y1, x2, y2 = 414, 112, 770, 364
@@ -1489,8 +1532,8 @@ class Kiosk:
     def draw_key(self, k, kx, ky, kw, kh, fill, sink=0):
         kx, ky = kx, ky + sink
         self.rounded(kx, ky, kx + kw, ky + kh, 14, fill)
-        if k == "Clear":
-            self.t(kx + kw / 2, ky + kh / 2, self.tr("Clear"), 17, True, BLUE)
+        if k in ("Clear", "Space"):
+            self.t(kx + kw / 2, ky + kh / 2, self.tr(k), 17, True, BLUE)
         elif k == "⌫":
             bx, by = kx + kw / 2, ky + kh / 2
             self.c.create_polygon(bx - 16, by, bx - 8, by - 10, bx + 14, by - 10, bx + 14, by + 10,
@@ -1499,51 +1542,6 @@ class Kiosk:
             self.c.create_line(bx - 2, by + 5, bx + 8, by - 5, fill=INK, width=2.5, capstyle="round")
         else:
             self.t(kx + kw / 2, ky + kh / 2, k, 24, True, INK)
-
-    def s_gc_amount(self):
-        self.title("How much do you want to cash in?", 70, 34)
-        x1, y1, x2, y2 = 30, 112, 386, 364
-        self.card(x1, y1, x2, y2)
-        self.t(x1 + 26, y1 + 34, self.tr("Amount to cash in"), 16, False, GREY, "w")
-        self.picture("gcash_logo", x2 - 80, y1 + 34)
-        amount = int(self.gc_amount_buf or 0)
-        self.t(x1 + 24, y1 + 106, money(amount), 60, True, INK if amount else "#B8C2D9", "w")
-        self.c.create_line(x1 + 26, y1 + 152, x2 - 26, y1 + 152, fill=LIGHT, width=2)
-        if amount:
-            fee = math.ceil(amount * GCASH_FEE_RATE)
-            self.t(x1 + 26, y1 + 176, f"+ {money(fee)} {self.tr('fee (5%)')}", 15, True, GREY, "w")
-        self.rounded(x1 + 22, y1 + 194, x2 - 22, y1 + 238, 14, AMBER_SOFT)
-        ax, ay = x1 + 44, y1 + 216
-        self.c.create_polygon(ax, ay - 11, ax + 12, ay + 10, ax - 12, ay + 10, fill=AMBER,
-                              outline=AMBER, width=2, joinstyle="round")
-        self.t(ax, ay + 2, "!", 12, True, WHITE)
-        self.t(ax + 22, ay, self.tr("Proof of concept, for research only."), 14, True, AMBER_TEXT, "w")
-        self.keypad(self.gc_amount_digit, self.gc_amount_clear, self.gc_amount_back)
-        self.back(self.go("exchange_type"))
-        self.edge("right", "Continue  →", self.gc_amount_next, 0 < amount <= GCASH_MAX)
-
-    def gc_amount_digit(self, d):
-        nxt = (self.gc_amount_buf + d).lstrip("0")
-        if nxt and int(nxt) <= GCASH_MAX:
-            self.gc_amount_buf = nxt
-        self.redraw()
-
-    def gc_amount_clear(self):
-        self.gc_amount_buf = ""
-        self.redraw()
-
-    def gc_amount_back(self):
-        self.gc_amount_buf = self.gc_amount_buf[:-1]
-        self.redraw()
-
-    def gc_amount_next(self):
-        amount = int(self.gc_amount_buf or 0)
-        if amount > self.gcash_balance:
-            self.show("gc_amount", {"kind": "gc_balance", "amount": amount})
-            return
-        self.gc_amount = amount
-        self.gc_fee = math.ceil(amount * GCASH_FEE_RATE)
-        self.show("gc_number")
 
     def s_gc_number(self):
         self.title("What's your GCash number?", 70, 34)
@@ -1563,11 +1561,10 @@ class Kiosk:
             x += 24
         self.t(x1 + 26, y1 + 142, self.tr("Mobile number linked to your GCash"), 15, False, GREY, "w")
         self.rounded(x1 + 22, y1 + 180, x2 - 22, y1 + 232, 14, TINT)
-        self.t(x1 + 42, y1 + 206, self.tr("Cash in amount"), 16, False, GREY, "w")
-        self.t(x2 - 42, y1 + 206, money(self.gc_amount), 22, True, INK, "e")
+        self.t(x1 + 42, y1 + 206, f"{self.tr('Coins only.')} {GCASH_FEE_RATE:.0%} {self.tr('fee')}",
+               15, True, INK, "w")
         self.keypad(self.gc_number_digit, self.gc_number_clear, self.gc_number_back)
-        if not self.credit:
-            self.back(self.go("gc_amount"))
+        self.back(self.go("exchange_type"))
         valid = len(digits) == 11 and digits.startswith("09")
         self.edge("right", "Continue  →", self.gc_number_next, valid)
 
@@ -1585,10 +1582,69 @@ class Kiosk:
         self.redraw()
 
     def gc_number_next(self):
-        if self.gc_reentry and self.credit == self.target:
-            self.start_cashing()
+        self.show("gc_name")
+
+    # Account name (on-screen keyboard) --------------------------------
+
+    NAME_ROWS = ("QWERTYUIOP", "ASDFGHJKLÑ", "ZXCVBNM.-⌫")
+    NAME_MAX = 30
+
+    def s_gc_name(self):
+        self.title("What's the name on your GCash?", 44, 30)
+        x1, y1, x2, y2 = 23, 74, 777, 146
+        self.card(x1, y1, x2, y2, r=20)
+        name = self.gc_name_buf
+        if name:
+            self.t(x1 + 28, y1 + 36, name, 28, True, INK, "w")
+            cx = x1 + 30 + self.measure(name, 28, True)
+            self.c.create_line(cx, y1 + 20, cx, y1 + 52, fill=BLUE, width=3)
+        else:
+            self.t(x1 + 28, y1 + 36, self.tr("Account name, as shown in your GCash app"), 20, True, "#B8C2D9", "w")
+        kw, kh, gap = 70, 46, 6
+        left = (W - (10 * kw + 9 * gap)) / 2
+        top = 160
+        for r, row in enumerate(self.NAME_ROWS):
+            for i, k in enumerate(row):
+                self.name_key(k, left + i * (kw + gap), top + r * (kh + gap), kw, kh)
+        ky = top + 3 * (kh + gap)
+        self.name_key("Clear", left, ky, 2 * kw + gap, kh)
+        self.name_key("Space", left + 2 * (kw + gap), ky, 8 * kw + 7 * gap, kh)
+        self.back(self.go("gc_number"))
+        self.edge("right", "Continue  →", self.gc_name_next, len(name.strip()) >= 2)
+
+    def name_key(self, k, kx, ky, kw, kh):
+        if k == "⌫":
+            cmd = self.gc_name_back
+        elif k == "Clear":
+            cmd = self.gc_name_clear
+        else:
+            cmd = lambda: self.gc_name_type(" " if k == "Space" else k)
+        self.draw_key(k, kx, ky, kw, kh, TINT)
+        self.act((kx, ky, kx + kw, ky + kh), cmd,
+                 lambda: self.draw_key(k, kx, ky, kw, kh, PRESS_KEY, sink=2))
+
+    def gc_name_type(self, ch):
+        buf = self.gc_name_buf
+        if ch == " " and (not buf or buf.endswith(" ")):
             return
-        self.target = self.gc_amount + self.gc_fee
+        if len(buf) < self.NAME_MAX:
+            self.gc_name_buf = buf + ch
+        self.redraw()
+
+    def gc_name_back(self):
+        self.gc_name_buf = self.gc_name_buf[:-1]
+        self.redraw()
+
+    def gc_name_clear(self):
+        self.gc_name_buf = ""
+        self.redraw()
+
+    def gc_name_next(self):
+        self.gc_name = " ".join(self.gc_name_buf.split())
+        if self.gcash_balance < GCASH_MAX_INSERT:
+            self.show("gc_unavailable")
+            return
+        self.target = GCASH_MAX_INSERT
         self.notice = None
         self.show("insert")
 
@@ -1602,28 +1658,26 @@ class Kiosk:
 
     def start_cashing(self):
         if (self.fault or self.flow != "gcash" or self.overlay
-                or self.screen not in ("insert", "gc_error", "gc_number")
-                or self.target <= 0 or self.credit != self.target):
+                or self.screen != "insert" or self.credit <= 0):
             return False
-        self.show("gc_cashing")
-        bad = self.demo["bad_number"]
-        self.demo["bad_number"] = False
-        self.jobs["cash"] = self.root.after(CASHING_MS, lambda: self.cashing_result(not bad))
+        self.gc_amount, self.gc_fee = self.gc_split()
+        if self.gc_amount <= 0:
+            return False
+        return self.cashing_result(True)
 
     def cashing_result(self, ok):
-        self.jobs.pop("cash", None)
-        if (self.screen != "gc_cashing" or self.flow != "gcash" or self.fault
-                or self.target <= 0 or self.credit != self.target):
+        """No GCash API: save the request so staff can send it manually."""
+        if not ok or self.screen != "insert" or self.flow != "gcash" or self.fault:
             return False
-        if ok:
-            self.gcash_balance -= self.gc_amount
-            self.gc_ref = self.ensure_reference()
-            self.references.record(self.gc_ref, "completed", {"amount": self.gc_amount,
-                                   "fee": self.gc_fee, "number": self.masked()})
-            self.log("gcash", amount=self.gc_amount, fee=self.gc_fee, number=self.masked(), ref=self.gc_ref)
-            self.show("gc_success")
-        else:
-            self.show("gc_error")
+        self.gcash_balance -= self.gc_amount
+        self.gc_ref = self.ensure_reference()
+        self.references.record(self.gc_ref, "pending", {
+            "amount": self.gc_amount, "fee": self.gc_fee, "received": self.credit,
+            "number": self.gc_number_buf, "name": self.gc_name})
+        self.log("gcash", status="pending", amount=self.gc_amount, fee=self.gc_fee,
+                 received=self.credit, number=self.masked(), ref=self.gc_ref)
+        self.show("gc_success")
+        return True
 
     def gc_card(self, y1=40, y2=370):
         x1, x2 = 130, 670
@@ -1632,44 +1686,21 @@ class Kiosk:
         self.picture("gcash_logo", x2 - 80, y1 + 34)
         return x1, y1, x2, y2
 
-    def s_gc_cashing(self):
-        x1, y1, x2, y2 = self.gc_card(60, 400)
-        cx = W / 2
-        self.spinner_ring(cx, y1 + 132, 46)
-        self.t(cx, y1 + 222, f"{self.tr('Cashing in')} {money(self.gc_amount)}", 30, True, INK)
-        self.t(cx, y1 + 258, f"{self.tr('Sending to GCash')} {self.masked()}", 17, True, BLUE)
-        self.c.create_line(x1 + 40, y1 + 286, x2 - 40, y1 + 286, fill=LIGHT, width=2)
-        self.t(cx, y1 + 312, self.tr("This might take a while. Please don't leave yet."), 16, False, GREY)
-
     def s_gc_success(self):
         x1, y1, x2, y2 = self.gc_card()
         cx = W / 2
-        self.check_mark(cx, y1 + 118, 30, GREEN, "#DCFCE7")
-        self.t(cx, y1 + 198, self.tr("Cash in successful"), 30, True, INK)
-        self.t(cx, y1 + 234, f"{money(self.gc_amount)} {self.tr('sent to GCash')} {self.masked()}", 17, True, BLUE)
+        self.check_mark(cx, y1 + 104, 30, GREEN, "#DCFCE7")
+        self.t(cx, y1 + 178, self.tr("Cash in received"), 30, True, INK)
+        self.t(cx, y1 + 212, f"{money(self.gc_amount)} {self.tr('will be sent to')} {self.masked()}",
+               17, True, BLUE)
+        self.t(cx, y1 + 236, self.gc_name, 15, True, GREY)
         self.c.create_line(x1 + 40, y1 + 256, x2 - 40, y1 + 256, fill=LIGHT, width=2)
         self.t(cx, y1 + 280, f"Ref. No. {self.gc_ref}", 18, True, INK)
-        self.t(cx, y1 + 304, f"{self.tr('Fee paid:')} {money(self.gc_fee)}. {self.tr('Take a photo of this screen.')}",
-               15, False, GREY)
-        left = max(0, math.ceil(10 - (time.monotonic() - self.screen_since)))
+        self.t(cx, y1 + 304, f"{self.tr('Fee paid:')} {money(self.gc_fee)}. "
+               f"{self.tr('Our team will send it shortly. Take a photo of this screen.')}", 14, False, GREY)
+        left = max(0, math.ceil(GC_DONE_S - (time.monotonic() - self.screen_since)))
         self.t(140, 418, f"{self.tr('Back to start in')} {left}s", 16, True, SOFT)
         self.edge("right", "Done  →", self.go("welcome"), w=200)
-
-    def s_gc_error(self):
-        x1, y1, x2, y2 = self.gc_card()
-        cx = W / 2
-        self.alert(cx, y1 + 112, 28, RED, "#FEE2E2")
-        self.t(cx, y1 + 186, self.tr("Number not found"), 30, True, INK)
-        self.t(cx, y1 + 222, f"{self.spaced()} {self.tr("isn't on GCash.")}", 17, True, RED)
-        self.c.create_line(x1 + 40, y1 + 254, x2 - 40, y1 + 254, fill=LIGHT, width=2)
-        self.t(cx, y1 + 282, f"{self.tr('Your')} {money(self.credit)} {self.tr('is safe. Check the number and try again.')}",
-               16, True, BLUE)
-        self.edge("right", "Re-enter GCash number  →", self.reenter_number, w=330)
-
-    def reenter_number(self):
-        self.gc_reentry = True
-        self.gc_number_buf = ""
-        self.show("gc_number")
 
     # ------------------------------------------------------------------
     # Overlays
@@ -1714,15 +1745,15 @@ class Kiosk:
         self.t(left_x + 30, iy, msg, 15, True, AMBER_TEXT, "w")
         self.blue_button(cx, 316, "I'm still here", self.still_here)
 
-    def o_gc_balance(self):
-        self.overlay_card(230, 110, 570, 380)
+    def o_gc_cancel(self):
+        self.overlay_card(210, 100, 590, 400)
         cx = W / 2
-        self.alert(cx, 170, 24, AMBER, AMBER_SOFT)
-        self.t(cx, 232, self.tr("Not enough GCash balance"), 23, True, INK)
-        self.t(cx, 264, self.tr("Can't cash in") + " " + money(self.overlay["amount"]) +
-               " " + self.tr("right now"), 17, True, BLUE)
-        self.t(cx, 290, self.tr("Please try a smaller amount."), 15, False, GREY)
-        self.blue_button(cx, 312, "Change amount", lambda: self.show("gc_amount"))
+        self.alert(cx, 160, 24, AMBER, AMBER_SOFT)
+        self.t(cx, 220, self.tr("Cancel cash in?"), 24, True, INK)
+        self.t(cx, 254, f"{self.tr('Your')} {money(self.credit)} {self.tr('will come back as coins.')}",
+               16, True, BLUE)
+        self.blue_button(cx, 282, "Give my coins back", self.cancel_gcash, w=280)
+        self.small_pill(cx - 90, 344, cx + 90, 376, "Keep going", lambda: self.show("insert"))
 
     def still_here(self):
         self.last_input = time.monotonic()
@@ -1749,8 +1780,6 @@ class Kiosk:
                  lambda: self.admin_toggle("reject"), self.demo["reject"]),
                 (f"Jam next payout: {'On' if self.demo['jam'] else 'Off'}",
                  lambda: self.admin_toggle("jam"), self.demo["jam"]),
-                (f"Next GCash number fails: {'On' if self.demo['bad_number'] else 'Off'}",
-                 lambda: self.admin_toggle("bad_number"), self.demo["bad_number"]),
             ]
         if self.fault:
             rows.append((f"Mark jam {self.fault['ref']} fixed", self.admin_fix, True))
@@ -1887,7 +1916,7 @@ class Kiosk:
         on_screen = now - self.screen_since
         o = self.overlay
         if (self.fault and self.screen not in ("incident", "admin")
-                and not (self.incident_dismissed and self.screen == "welcome")):
+                and not (self.incident_dismissed and self.screen in SAFE_SCREENS)):
             self.incident_info = self.fault
             self.show("incident")
         elif o and o["kind"] in ("timeout_empty", "timeout_money"):
@@ -1905,7 +1934,7 @@ class Kiosk:
         elif not o:
             if self.screen == "done" and on_screen >= DONE_S:
                 self.show("welcome")
-            elif self.screen == "gc_success" and on_screen >= 10:
+            elif self.screen == "gc_success" and on_screen >= GC_DONE_S:
                 self.show("welcome")
             elif self.screen in ("out_of_coins",) and on_screen >= 8:
                 self.show("welcome")

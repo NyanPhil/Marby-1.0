@@ -9,3 +9,7 @@
 {"time": "2026-10-31 22:28:39", "mode": "demo", "kind": "forfeit", "amount": 100, "flow": "bill", "inserted": [["bill", 100]], "ref": "000009"}
 {"time": "2026-10-31 22:56:42", "mode": "demo", "kind": "exchange", "flow": "bill", "amount": 100, "plan": {"20": 4, "10": 2}, "ref": "000010"}
 {"time": "2026-10-31 22:56:57", "mode": "demo", "kind": "incident", "type": "overpayment", "owed": 50, "flow": "gcash", "inserted": [["bill", 50]], "ref": "000011", "bill": 50, "remaining": 9, "excess": 41, "target": 9, "total_received": 50}
+{"time": "2026-11-15 15:38:46", "mode": "demo", "kind": "refund", "flow": "gcash", "amount": 20, "plan": {"20": 1}, "ref": "000013"}
+{"time": "2026-11-15 15:39:16", "mode": "demo", "kind": "refund", "flow": "gcash", "amount": 20, "plan": {"20": 1}, "ref": "000014"}
+{"time": "2026-11-15 15:39:35", "mode": "demo", "kind": "gcash", "status": "pending", "amount": 9, "fee": 1, "received": 10, "number": "0966 *** 6666", "ref": "000015"}
+{"time": "2026-11-15 15:53:19", "mode": "demo", "kind": "gcash", "status": "pending", "amount": 9, "fee": 1, "received": 10, "number": "0999 *** 9999", "ref": "000016"}

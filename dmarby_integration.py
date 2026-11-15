@@ -42,7 +42,8 @@ class KioskHardwareMixin:
             super().__init__(root)
             self._hw_ready = True
             self.stock = self._stock_from_backend()
-            self.gcash_balance = 0  # A demo balance is never usable in hardware mode.
+            # Team GCash wallet balance available for manual sends (config, default PHP 2,000).
+            self.gcash_balance = int(cfg.get("gcash_float", 2000))
             if self.hardware.storage.unresolved:
                 self._show_saved_incident()
             else:
@@ -109,7 +110,7 @@ class KioskHardwareMixin:
                 if screen == "welcome" and unresolved and not self.incident_dismissed:
                     self._hardware_fault("An unfinished deposit cannot be cleared by returning home.")
                     return
-                if unresolved and self.incident_dismissed and screen not in ("welcome", "incident", "admin"):
+                if unresolved and self.incident_dismissed and screen not in ("welcome", "paused", "contact", "incident", "admin"):
                     screen, overlay = "incident", None
         super().show(screen, overlay)
         if self._hw_ready:
@@ -124,7 +125,7 @@ class KioskHardwareMixin:
             if self.screen == "insert" and not self.overlay and not self.fault:
                 if self.flow == "bill" and not self.credit:
                     source = "bill"
-                elif self.flow in ("break", "combine") and self.credit < self.target:
+                elif self.flow in ("break", "combine", "gcash") and self.credit < self.target:
                     source = "coin"
             if source is not None:
                 if not self.hardware.storage.ready_for_source(source, self.hardware.maps[source].values()):
@@ -160,7 +161,7 @@ class KioskHardwareMixin:
                          for item in self.hardware.storage.state["received"]]
         self.last_input = time.monotonic()
         expected = "bill" if self.flow == "bill" else "coin"
-        if (self.screen != "insert" or self.flow not in ("bill", "break", "combine")
+        if (self.screen != "insert" or self.flow not in ("bill", "break", "combine", "gcash")
                 or source != expected):
             self._hardware_fault("Cash was accepted outside its deposit screen.")
             return
@@ -220,7 +221,8 @@ class KioskHardwareMixin:
     def start_dispense(self):
         if self.fault or self.hardware.storage.state.get("status") != "paid":
             return
-        if self._payout_future is not None or self.screen != "review":
+        refund = self.flow == "gcash" and self.screen == "insert"  # cancelled cash-in
+        if self._payout_future is not None or (self.screen != "review" and not refund):
             return
         try:
             self.hardware.set_acceptance(None)
@@ -316,19 +318,24 @@ class KioskHardwareMixin:
                 self._hardware_fault("The customer timed out with cash in the machine. Balance remains owed.")
         super().tick()
 
-    def start_gcash(self):
-        self.hardware.set_acceptance(None)
-        self.show("gc_unavailable")
-
     def start_cashing(self):
-        self.hardware.set_acceptance(None)
-        if self.hardware.storage.unresolved:
-            self._hardware_fault("GCash transfer is unavailable; accepted cash requires staff settlement.")
-        else:
-            self.show("gc_unavailable")
+        """Coins in, nothing out: close the deposit and save a pending GCash request."""
+        if (self.fault or self.flow != "gcash" or self.overlay or self.screen != "insert"
+                or self.credit <= 0 or self.hardware.storage.state.get("status") != "paid"):
+            return False
+        self.gc_amount, self.gc_fee = self.gc_split()
+        if self.gc_amount <= 0:
+            return False
+        try:
+            self.hardware.complete_transfer(self.gc_amount, self.gc_fee)
+            self._deposit_open = None
+        except Exception as exc:
+            self._hardware_fault(str(exc))
+            return False
+        return super().cashing_result(True)
 
     def cashing_result(self, ok):
-        return False  # Demo completion callbacks can never confirm a real transfer.
+        return False  # Only start_cashing, after the journal closes, may record a cash-in.
 
     def bill_inserted(self, value):
         return False

@@ -97,7 +97,7 @@ class Storage:
             # Record received cash first, then attach its durable reference.
             if not self.state.get('reference'):
                 self.state['reference'] = self.references.allocate(
-                    'cash', 'hardware', dict(self.state, flow=flow))
+                    'gcash' if flow == 'gcash' else 'cash', 'hardware', dict(self.state, flow=flow))
                 atomic_json(self.path, self.state)
             else:
                 self.references.record(self.state['reference'], 'open', self.state)
@@ -172,6 +172,19 @@ class Storage:
             atomic_json(self.path, self.state)
             if self.state.get('reference'):
                 self.references.record(self.state['reference'], 'completed', self.state)
+
+    def complete_transfer(self, amount, fee):
+        """Close a coin deposit that becomes a manual GCash cash-in (nothing dispensed)."""
+        with self._lock:
+            if self.state.get('status') != 'paid' or self.state.get('source') != 'coin':
+                raise HardwareFault('No coin deposit is open for GCash.')
+            if amount <= 0 or fee < 0 or amount + fee != self.state.get('credit'):
+                raise HardwareFault('GCash amount and fee do not match the recorded coins.')
+            self.state['status'] = 'completed'
+            self.state['outcome'] = 'gcash_pending'
+            self.state['gcash'] = {'amount': amount, 'fee': fee}
+            self.state['completed_at'] = time.time()
+            atomic_json(self.path, self.state)
 
     def fault(self, detail):
         with self._lock:
@@ -402,6 +415,15 @@ class RealHardware:
                 raise HardwareFault('Cash signal arrived during payout. Operator must reconcile the cash.')
             self.storage.complete()
             self._bill_latched = False
+            self._deposit_source = None
+
+    def complete_transfer(self, amount, fee):
+        """Close a GCash coin deposit; staff send the money manually."""
+        with self._accept_lock:
+            self.set_acceptance(None)
+            if self.stopping.is_set() or self.input_pending():
+                raise HardwareFault('Cash signal arrived during cash in. Operator must reconcile the cash.')
+            self.storage.complete_transfer(amount, fee)
             self._deposit_source = None
 
     def _on_drop(self):
