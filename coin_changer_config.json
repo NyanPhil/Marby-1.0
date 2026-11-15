@@ -43,7 +43,7 @@
   "journal_file": "transaction_state.json",
   "servos": {
     "1": {
-      "channel": 8,
+      "channel": 6,
       "enabled": true,
       "home_angle": 0,
       "release_angle": 65,
@@ -54,7 +54,7 @@
       "actuation_range": 180
     },
     "5": {
-      "channel": 10,
+      "channel": 5,
       "enabled": true,
       "home_angle": 0,
       "release_angle": 65,
@@ -65,7 +65,7 @@
       "actuation_range": 180
     },
     "10": {
-      "channel": 12,
+      "channel": 2,
       "enabled": true,
       "home_angle": 0,
       "release_angle": 65,
@@ -76,7 +76,7 @@
       "actuation_range": 180
     },
     "20": {
-      "channel": 14,
+      "channel": 1,
       "enabled": true,
       "home_angle": 0,
       "release_angle": 65,
@@ -88,10 +88,10 @@
     }
   },
   "servo_verified": {
-    "1": false,
-    "5": false,
-    "10": false,
-    "20": false
+    "1": true,
+    "5": true,
+    "10": true,
+    "20": true
   },
   "payout_coins": [
     1,
