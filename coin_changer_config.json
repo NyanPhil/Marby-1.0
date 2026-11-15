@@ -43,17 +43,6 @@
   "journal_file": "transaction_state.json",
   "servos": {
     "1": {
-      "channel": 6,
-      "enabled": true,
-      "home_angle": 0,
-      "release_angle": 65,
-      "hold_seconds": 0.45,
-      "settle_seconds": 0.3,
-      "min_pulse_us": 1000,
-      "max_pulse_us": 2000,
-      "actuation_range": 180
-    },
-    "5": {
       "channel": 5,
       "enabled": true,
       "home_angle": 0,
@@ -64,8 +53,19 @@
       "max_pulse_us": 2000,
       "actuation_range": 180
     },
+    "5": {
+      "channel": 4,
+      "enabled": true,
+      "home_angle": 0,
+      "release_angle": 65,
+      "hold_seconds": 0.45,
+      "settle_seconds": 0.3,
+      "min_pulse_us": 1000,
+      "max_pulse_us": 2000,
+      "actuation_range": 180
+    },
     "10": {
-      "channel": 2,
+      "channel": 1,
       "enabled": true,
       "home_angle": 0,
       "release_angle": 65,
@@ -76,7 +76,7 @@
       "actuation_range": 180
     },
     "20": {
-      "channel": 1,
+      "channel": 0,
       "enabled": true,
       "home_angle": 0,
       "release_angle": 65,
