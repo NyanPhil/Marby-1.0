@@ -1,0 +1,12 @@
+# Kiosk data (each machine keeps its own)
+transactions.log
+transaction_numbers.sqlite3
+transaction_numbers.sqlite3-journal
+transaction_state.json
+inventory.json
+reconciliations.jsonl
+
+# Python
+__pycache__/
+*.pyc
+.venv/
