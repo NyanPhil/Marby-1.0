@@ -46,10 +46,10 @@
   "servos": {
     "1": {
       "channel": 5,
-      "direction": "counterclockwise",
+      "direction": "clockwise",
       "enabled": true,
       "home_angle": 0,
-      "release_angle": 65,
+      "release_angle": 70,
       "hold_seconds": 0.45,
       "settle_seconds": 0.3,
       "min_pulse_us": 1000,
@@ -57,8 +57,8 @@
       "actuation_range": 180
     },
     "5": {
-      "channel": 6,
-      "direction": "clockwise",
+      "channel": 4,
+      "direction": "counterclockwise",
       "enabled": true,
       "home_angle": 0,
       "release_angle": 65,
@@ -72,8 +72,8 @@
       "channel": 1,
       "direction": "counterclockwise",
       "enabled": true,
-      "home_angle": 0,
-      "release_angle": 65,
+      "home_angle": 12,
+      "release_angle": 108,
       "hold_seconds": 0.45,
       "settle_seconds": 0.3,
       "min_pulse_us": 1000,
@@ -85,7 +85,7 @@
       "direction": "clockwise",
       "enabled": true,
       "home_angle": 0,
-      "release_angle": 65,
+      "release_angle": 90,
       "hold_seconds": 0.45,
       "settle_seconds": 0.3,
       "min_pulse_us": 1000,
