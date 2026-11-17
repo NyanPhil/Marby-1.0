@@ -437,11 +437,16 @@ class RealHardware:
                     self.frame_permission[source] = (self.accepting == source)
                     if source == 'bill':
                         self._bill_latched = True
-                    try:
-                        self.set_acceptance(None)
-                    except Exception:
-                        self.frame_permission[source] = False
-                        self.stopping.set()
+                    # Some coin acceptors truncate their output pulse train
+                    # when inhibit changes. Keep coin intake enabled until
+                    # poll() has decoded the complete frame. Bills retain
+                    # immediate inhibition and their one-bill latch.
+                    if source == 'bill' or not self.frame_permission[source]:
+                        try:
+                            self.set_acceptance(None)
+                        except Exception:
+                            self.frame_permission[source] = False
+                            self.stopping.set()
         return callback
 
     def input_pending(self, source=None):
@@ -513,6 +518,16 @@ class RealHardware:
         # Caller holds _accept_lock. UI redraws cannot reopen an active frame,
         # a bill already consumed by this session, or a paid bill transaction.
         permitted = self._requested_source
+        # UI polling must not inhibit an authorized coin halfway through
+        # its pulse train. An explicit disable, stop, or fault still wins.
+        coin_frame = (permitted == 'coin' and self._deposit_source == 'coin'
+                      and self.accepting == 'coin' and self.input_pending('coin')
+                      and self.frame_permission['coin'] is True
+                      and not self.stopping.is_set() and not self._input_fault
+                      and not self.input_pending('bill')
+                      and not self.inputs['bill'].is_active)
+        if coin_frame:
+            return
         if (permitted != self._deposit_source or self.stopping.is_set()
                 or self._input_fault or self.input_pending()
                 or any(inp.is_active for inp in self.inputs.values())
@@ -565,6 +580,10 @@ class RealHardware:
                     return self._latch_input_fault(
                         f'Unexpected {source} pulse group while intake was disabled: {pulses} pulses. '
                         'Additional cash may have entered; operator must reconcile it.')
+                if source == 'coin':
+                    # Close only after the complete value is decoded; the UI
+                    # may reopen after recording credit and checking its target.
+                    self.set_acceptance(None)
                 events.append((source, value))
             self._refresh_acceptance()
         return events
