@@ -135,9 +135,9 @@ class KioskHardwareMixin:
                     ready = (sum(c * n for c, n in plan.items()) == self.target
                              and self.hardware.storage.can_pay(plan))
                 else:
-                    # GCash has no selected coin payout; keep its existing guard.
-                    ready = self.hardware.storage.ready_for_source(
-                        source, self.hardware.maps[source].values())
+                    # GCash cash-in does not dispense coins, so hopper stock
+                    # must not block deposits.
+                    ready = True
                 if not ready:
                     self.hardware.set_acceptance(None)
                     if self.credit:
@@ -697,5 +697,3 @@ def notification_main():
 
 if __name__=='__main__':
     notification_main()
-
-
