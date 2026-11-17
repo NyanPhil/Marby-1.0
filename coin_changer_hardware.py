@@ -13,6 +13,8 @@ import threading
 import time
 from pathlib import Path
 
+from transaction_numbers import TransactionNumbers
+
 BASE = Path(__file__).resolve().parent
 COINS = (0.25, 1, 5, 10, 20)
 
@@ -47,11 +49,14 @@ def project_path(path):
 
 
 class Storage:
-    """Crash-visible journal. Unfinished transactions require an operator."""
-    def __init__(self, cfg):
+    """Crash-visible journal. A failed transaction is recorded, then parked into
+    history so the next customer can start; the record is never lost."""
+    def __init__(self, cfg, references=None):
         self.coins = payout_coins_for(cfg)
         self.path = project_path(cfg.get('journal_file', 'transaction_state.json'))
         self.inventory_path = project_path(cfg.get('inventory_file', 'inventory.json'))
+        self.references = references if references is not None else TransactionNumbers(
+            self.path.with_name('transaction_numbers.sqlite3'), self.path.with_name('transactions.log'))
         self._lock = threading.Lock()
         self.state = json.loads(self.path.read_text(encoding='utf8')) if self.path.exists() else {}
         self.inventory = (
@@ -69,13 +74,13 @@ class Storage:
     def unresolved(self):
         return self.state.get('status') in ('paid', 'dispensing', 'fault')
 
-    def receive(self, source, value):
+    def receive(self, source, value, flow=None):
         with self._lock:
             allowed = {'bill': {50, 100}, 'coin': {1, 5, 10, 20}}
             if (source not in allowed or type(value) is not int
                     or value not in allowed[source]):
                 raise HardwareFault('Unsupported cash input.')
-            if self.state.get('status') not in ('paid', None, 'completed', 'reconciled'):
+            if self.state.get('status') not in ('paid', None, 'completed', 'reconciled', 'parked'):
                 raise HardwareFault('Another transaction requires operator review.')
             if self.state.get('status') == 'paid' and self.state.get('source') != source:
                 raise HardwareFault('Mixed input sources in a single transaction.')
@@ -90,6 +95,13 @@ class Storage:
             self.state['credit'] += value
             self.state['received'].append({'source': source, 'value': value, 'time': time.time()})
             atomic_json(self.path, self.state)
+            # Record received cash first, then attach its durable reference.
+            if not self.state.get('reference'):
+                self.state['reference'] = self.references.allocate(
+                    'gcash' if flow == 'gcash' else 'cash', 'hardware', dict(self.state, flow=flow))
+                atomic_json(self.path, self.state)
+            else:
+                self.references.record(self.state['reference'], 'open', self.state)
 
     def can_pay(self, plan):
         return (bool(plan) and all(c in self.coins and type(n) is int and n > 0
@@ -159,6 +171,47 @@ class Storage:
             self.state['status'] = 'completed'
             self.state['completed_at'] = time.time()
             atomic_json(self.path, self.state)
+            if self.state.get('reference'):
+                self.references.record(self.state['reference'], 'completed', self.state)
+
+    def complete_transfer(self, amount, fee):
+        """Close a coin deposit that becomes a manual GCash cash-in (nothing dispensed)."""
+        with self._lock:
+            if self.state.get('status') != 'paid' or self.state.get('source') != 'coin':
+                raise HardwareFault('No coin deposit is open for GCash.')
+            if amount <= 0 or fee < 0 or amount + fee != self.state.get('credit'):
+                raise HardwareFault('GCash amount and fee do not match the recorded coins.')
+            self.state['status'] = 'completed'
+            self.state['outcome'] = 'gcash_pending'
+            self.state['gcash'] = {'amount': amount, 'fee': fee}
+            self.state['completed_at'] = time.time()
+            atomic_json(self.path, self.state)
+
+    def park(self, note='Recorded as an incident; the kiosk continued.'):
+        """Move an unfinished or failed journal into parked_incidents.jsonl.
+
+        The incident is already in transaction_numbers.sqlite3 (and the dashboard);
+        this keeps the full journal on disk and frees the slot for the next customer.
+        Returns True if something was parked.
+        """
+        with self._lock:
+            if self.state.get('status') not in ('paid', 'dispensing', 'fault'):
+                return False
+            if self.state.get('status') != 'fault':
+                # Unfinished at restart: record it as an incident before moving on.
+                self.state['fault'] = 'Unfinished transaction found after restart.'
+                self.state['status'] = 'fault'
+                if self.state.get('reference'):
+                    self.references.record(self.state['reference'], 'incident', self.state)
+            record = dict(self.state, parked_at=time.time(), parked_note=note)
+            with open(self.path.with_name('parked_incidents.jsonl'), 'a', encoding='utf8') as f:
+                f.write(json.dumps(record, ensure_ascii=False) + '\n')
+                f.flush()
+                os.fsync(f.fileno())
+            self.state = {'status': 'parked', 'previous_reference': self.state.get('reference'),
+                          'parked_at': record['parked_at']}
+            atomic_json(self.path, self.state)
+            return True
 
     def fault(self, detail):
         with self._lock:
@@ -166,6 +219,8 @@ class Storage:
             self.state['fault'] = str(detail)
             self.state['fault_at'] = time.time()
             atomic_json(self.path, self.state)
+            if self.state.get('reference'):
+                self.references.record(self.state['reference'], 'incident', self.state)
 
 
 class PulseCounter:
@@ -262,14 +317,36 @@ def pulse_counter_for(cfg, source):
         max_frame_s=float(cfg.get(source + '_max_frame_seconds', 45.0 if source == 'bill' else 60.0)))
 
 
+def servo_angles(cfg, setting):
+    """Physical (home, release) angles for one servo, honouring its direction.
+
+    Every servo is configured with the same logical angles. A servo set to turn
+    the other way from the hardware's natural direction is mirrored
+    (actuation_range - angle), exactly like servo_test.py.
+    """
+    direction = setting.get('direction', 'counterclockwise')
+    if direction not in ('clockwise', 'counterclockwise'):
+        raise HardwareFault(f'Servo direction must be clockwise or counterclockwise, not {direction!r}.')
+    span = float(setting.get('actuation_range', 180))
+    home, release = float(setting['home_angle']), float(setting['release_angle'])
+    if not (0 <= home <= span and 0 <= release <= span):
+        raise HardwareFault('Servo angles must be within the actuation range.')
+    natural_clockwise = bool(cfg.get('increasing_angle_turns_clockwise', False))
+    if (direction == 'clockwise') != natural_clockwise:
+        home, release = span - home, span - release
+    return home, release
+
+
 class RealHardware:
-    def __init__(self, cfg):
+    def __init__(self, cfg, references=None):
         self.cfg = cfg
         self.coins = payout_coins_for(cfg)
         for field in ('bill', 'coin'):
             if not cfg.get('inhibit_verified', {}).get(field, False):
                 raise HardwareFault(f'{field} inhibit circuit not verified. Block money entry until verified.')
-        if cfg.get('drop_sensor_pin') is None:
+        # Without a coin-exit sensor, each servo cycle counts as one coin dispensed.
+        self.use_drop_sensor = bool(cfg.get('coin_exit_sensor', True))
+        if self.use_drop_sensor and cfg.get('drop_sensor_pin') is None:
             raise HardwareFault('Coin-exit sensor required in real-money mode.')
         for coin in self.coins:
             if not cfg.get('servo_verified', {}).get(str(coin), False):
@@ -278,7 +355,9 @@ class RealHardware:
         if (any(type(ch) is not int or ch not in range(16) for ch in channels)
                 or len(channels) != len(set(channels))):
             raise HardwareFault('Payout servo channels must be unique PCA9685 outputs 0..15.')
-        pins = list(cfg['input_pin'].values()) + list(cfg['inhibit_pin'].values()) + [cfg['drop_sensor_pin']]
+        pins = list(cfg['input_pin'].values()) + list(cfg['inhibit_pin'].values())
+        if self.use_drop_sensor:
+            pins.append(cfg['drop_sensor_pin'])
         if len(pins) != len(set(pins)) or any(pin in (0, 1, 2, 3) for pin in pins):
             raise HardwareFault('GPIO pin conflict or pin reserved for I2C detected.')
         self.maps = {}
@@ -293,9 +372,14 @@ class RealHardware:
             if len(set(mapping.values())) != len(mapping):
                 raise HardwareFault('Duplicate denominations in ' + source + ' pulse map.')
             self.maps[source] = mapping
-        self.storage = Storage(cfg)
-        if self.storage.unresolved:
-            raise HardwareFault('Unresolved transaction in transaction_state.json; operator must reconcile.')
+        self.storage = Storage(cfg, references=references)
+        # An unfinished transaction must lock cash movement, not prevent the
+        # touchscreen from reopening. Keep the original journal untouched.
+        # The UI displays the saved reference/balance in a service incident.
+        try:
+            self.storage.references.ensure_ready()
+        except Exception as error:
+            raise HardwareFault(f'Transaction numbering storage is unavailable: {error}') from error
         self.accepting = None
         self._accept_lock = threading.RLock()
         self._requested_source = None
@@ -304,6 +388,10 @@ class RealHardware:
         self._input_fault = None
         self.frame_permission = {'bill': None, 'coin': None}
         self.stopping = threading.Event()
+        if self.storage.unresolved:
+            # Recovery mode is fail-closed: even a stray UI call cannot
+            # re-enable acceptors or drive a dispenser before reconciliation.
+            self.stopping.set()
         self.pulses = {s: pulse_counter_for(cfg, s) for s in ('bill', 'coin')}
         self.rearm_quiet = {s: float(cfg.get(s + '_rearm_quiet_seconds', self.pulses[s].gap_s))
                             for s in ('bill', 'coin')}
@@ -333,8 +421,9 @@ class RealHardware:
                 self.inputs[source] = inp
                 inp.when_activated = self._make_pulse_callback(source)
                 inp.when_deactivated = self.pulses[source].release
-            self.drop_sensor = DigitalInputDevice(cfg['drop_sensor_pin'], pull_up=True)
-            self.drop_sensor.when_activated = self._on_drop
+            if self.use_drop_sensor:
+                self.drop_sensor = DigitalInputDevice(cfg['drop_sensor_pin'], pull_up=True)
+                self.drop_sensor.when_activated = self._on_drop
         except Exception:
             self.close()
             raise
@@ -379,6 +468,32 @@ class RealHardware:
             self.storage.complete()
             self._bill_latched = False
             self._deposit_source = None
+
+    def complete_transfer(self, amount, fee):
+        """Close a GCash coin deposit; staff send the money manually."""
+        with self._accept_lock:
+            self.set_acceptance(None)
+            if self.stopping.is_set() or self.input_pending():
+                raise HardwareFault('Cash signal arrived during cash in. Operator must reconcile the cash.')
+            self.storage.complete_transfer(amount, fee)
+            self._deposit_source = None
+
+    def resume(self):
+        """After a failure has been recorded, let the next customer start fresh.
+
+        Waits only while a coin or bill is being counted right now (returns False).
+        """
+        with self._accept_lock:
+            if self.input_pending() or any(inp.is_active for inp in self.inputs.values()):
+                return False
+            self.storage.park()
+            self._input_fault = None
+            self._bill_latched = False
+            self._deposit_source = None
+            self.frame_permission = {'bill': None, 'coin': None}
+            self.stopping.clear()
+            self.set_acceptance(None)
+            return True
 
     def _on_drop(self):
         now = time.monotonic()
@@ -463,8 +578,7 @@ class RealHardware:
         if not setting or not setting.get('enabled', True):
             raise HardwareFault(f'No calibrated servo for PHP {coin}.')
         channel = int(setting['channel'])
-        home = float(setting['home_angle'])
-        release = float(setting['release_angle'])
+        home, release = servo_angles(self.cfg, setting)
         hold = float(setting.get('hold_seconds', .45))
         settle = float(setting.get('settle_seconds', .3))
         timeout = float(self.cfg.get('drop_timeout_seconds', 2.0))
@@ -484,6 +598,12 @@ class RealHardware:
             servo.angle = release
             time.sleep(hold)
             servo.angle = home
+            if not self.use_drop_sensor:
+                # No sensor: trust the servo cycle. inventory.json is the only count.
+                time.sleep(settle)
+                if self.stopping.is_set():
+                    raise HardwareFault('Dispensing interrupted.')
+                return
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 if self.stopping.is_set():
@@ -502,7 +622,10 @@ class RealHardware:
             raise HardwareFault(f'No coin detected after PHP {coin} servo cycle (possible empty tube/jam).')
         finally:
             try:
-                servo.angle = None if self.stopping.is_set() else home
+                if not self.stopping.is_set():
+                    servo.angle = home
+                    time.sleep(float(setting.get('return_seconds', .25)))  # let the arm reach home
+                servo.angle = None  # stop the PWM signal: the servo goes limp instead of holding
             except Exception:
                 pass
 
