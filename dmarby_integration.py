@@ -187,7 +187,13 @@ class KioskHardwareMixin:
             self.wrong = (self.target, value)
             self.show("wrong_bill")
         elif self.credit > self.target:
-            self._hardware_fault("Accepted coins exceed the selected total; staff must settle the balance.")
+            # The first wrong coin in Break Coins is already physically accepted.
+            # Reuse the existing reroute page while preserving its stored credit.
+            if self.flow == "break" and source == "coin" and len(self.inserted) == 1:
+                self.wrong = (self.target, value)
+                self.show("wrong_bill")
+            else:
+                self._hardware_fault("Accepted coins exceed the selected total; staff must settle the balance.")
         else:
             self.show("insert")
 

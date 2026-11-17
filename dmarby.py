@@ -1320,6 +1320,13 @@ class Kiosk:
             self.show("insert")
             return False
         if self.credit + value > self.target:
+            # A different first coin can be exchanged using the existing
+            # wrong-denomination screen, rather than silently discarding it.
+            if self.flow == "break" and self.credit == 0:
+                self.add_credit("coin", value)
+                self.wrong = (self.target, value)
+                self.show("wrong_bill")
+                return True
             self.notice = self.tr("That coin would go over. It was returned.")
             self.show("insert")
             return False
@@ -1344,16 +1351,23 @@ class Kiosk:
         x1, y1, x2, y2 = 150, 40, 650, 364
         self.card(x1, y1, x2, y2)
         cx = W / 2
-        self.note(value, cx, y1 + 74, 146)
+        is_coin = self.flow == "break" and bool(self.inserted) and self.inserted[-1][0] == "coin"
+        if is_coin:
+            self.coin(value, cx, y1 + 74, 120)
+        else:
+            self.note(value, cx, y1 + 74, 146)
         bx, by = cx + 70, y1 + 40
         self.oval(bx - 18, by - 18, bx + 18, by + 18, fill=AMBER, outline=WHITE, width=3)
         self.c.create_line(bx, by - 8, bx, by + 2, fill=WHITE, width=4, capstyle="round")
         self.oval(bx - 2.5, by + 6, bx + 2.5, by + 11, fill=WHITE, outline="")
-        self.t(cx, y1 + 154, f"{self.tr('You inserted a')} {money(value)} {self.tr('bill')}", 30, True, INK)
+        self.t(cx, y1 + 154, f"{self.tr('You inserted a')} {money(value)} {self.tr('coin' if is_coin else 'bill')}", 30, True, INK)
         self.t(cx, y1 + 190, f"{self.tr('Not the')} {money(picked)} {self.tr('you picked.')}", 17, True, "#B45309")
         self.c.create_line(x1 + 40, y1 + 222, x2 - 40, y1 + 222, fill=LIGHT, width=2)
-        self.t(cx, y1 + 266, self.tr("We can't give bills back, so let's turn") +
-               f"\n{self.tr('your')} {money(value)} " + self.tr("into coins instead."), 16, True, BLUE)
+        explanation = (f"Your {money(value)} coin was accepted.\nChoose smaller coins instead."
+                       if is_coin else
+                       self.tr("We can't give bills back, so let's turn") +
+                       f"\n{self.tr('your')} {money(value)} " + self.tr("into coins instead."))
+        self.t(cx, y1 + 266, explanation, 16, True, BLUE)
         self.t(W / 2, 376, "Returning home keeps your cash recorded for staff assistance.",
                13, False, SOFT)
         self.edge("left", "Back to Home", self.wrong_bill_home, w=240)
@@ -1368,7 +1382,8 @@ class Kiosk:
         return True
 
     def reroute_bill(self):
-        if not payable(self.credit, self.stock):
+        available = self.smaller_stock(self.credit) if self.flow == "break" else self.stock
+        if not payable(self.credit, available):
             self.incident("wrong_bill_unpayable", self.credit)
             return False
         self.target = self.credit
