@@ -62,7 +62,7 @@ GPIO numbers are **BCM** numbers unless a physical header pin is explicitly stat
 |---|---:|---:|
 | Allan coin pulses (existing PC817 input path) | 17 | 11 |
 | TB74 bill pulses (existing PC817 input path) | 27 | 13 |
-| Coin-exit sensor | 22 | 15 |
+| Coin-exit sensor (configured but **disabled**) | 22 | 15 |
 | Allan coin-acceptor INHIBIT relay control | **16** | **36** |
 | TB74 bill-acceptor 12 V **power** relay control (active LOW) | **26** | **37** |
 | PCA9685 SDA | 2 | 3 |
@@ -76,7 +76,7 @@ GPIO numbers are **BCM** numbers unless a physical header pin is explicitly stat
 - **Do not turn off the TB74 while it is transporting a bill or transmitting a pulse group.** Switching the 12 V power is not the same as asserting TB74 INHIBIT, which leaves the mechanism energized. Only turn off power after the bill path is known to be idle.
 - Test relay responses **without inserting cash**, and verify the TB74 is unpowered when the relay is released and during Raspberry Pi shutdown or reboot. A control signal being HIGH in a Python script does not by itself prove a fail-safe boot state.
 
-**Software integration is not finished:** `coin_changer_config.json` on this branch still lists `inhibit_pin.bill = 23` and `inhibit_pin.coin = 24` and sets both `inhibit_active_high` values to `true`. The new wiring uses **GPIO26/GPIO16**, and the TB74 relay is **active LOW**. The existing backend also commands intake closed on the **first pulse**; that behavior must **not** be applied directly to a bill-acceptor power relay. Update and test the backend's power-state sequencing before enabling unattended hardware transactions. The configuration currently marks `inhibit_verified` as true for both sources, but those flags do not establish verification of this changed physical setup.
+**Code/config alignment:** `coin_changer_config.json` now sets `inhibit_pin.bill = 26` (physical pin 37), `inhibit_pin.coin = 16` (physical pin 36), and `inhibit_active_high.bill = false` for the active-LOW TB74 relay. The Allan relay retains the **unverified** `inhibit_active_high.coin = true` setting until its actual trigger polarity and accept/reject behavior are confirmed. `inhibit_verified` is **false for both**, so the backend intentionally blocks hardware mode until testing. **Critically, the existing backend still commands intake closed on the first pulse**; this must be redesigned before using GPIO26 to switch bill acceptor power, or the machine could cut power during bill transport. The config pin correction alone does not implement safe TB74 power sequencing.
 
 #### Manual GPIO relay test (no money inserted)
 
@@ -124,24 +124,24 @@ finally:
 PY
 ```
 
-Keep hardware-control verification disabled for **real cash intake** until the power relay, Allan inhibit relay, complete pulse groups and safe recovery behavior are physically confirmed.
+Keep hardware-control verification disabled for **real cash intake** until the TB74 power relay has safe bill-completion sequencing, the Allan inhibit relay is tested, complete pulse groups are validated, and recovery behavior is confirmed.
 
 ### Four payout dispensers
 
 This frontend uses PHP 1, 5, 10 and 20 coins. The previous backend's fifth, 25-centavo dispenser remains supported for other configurations, but is not enabled by this frontend's configuration.
 
-**The denomination-to-channel assignments below have been confirmed by the user.** Dispenser calibration and coin-exit verification are separate checks.
+**Current `coin_changer_config.json` servo channel assignments** (PCA9685 channel numbers, 0–15) are listed below. Earlier README values 8/10/12/14 were described as physical sockets; they do **not** match the current software channel settings. Confirm actual dispenser wiring before powering the servos.
 
-| Payout coin | Confirmed PCA9685 socket |
+| Payout coin | Configured PCA9685 channel |
 |---:|---:|
-| PHP 1 | 8 |
-| PHP 5 | 10 |
-| PHP 10 | 12 |
-| PHP 20 | 14 |
+| PHP 1 | 5 |
+| PHP 5 | 4 |
+| PHP 10 | 1 |
+| PHP 20 | 0 |
 
-Each dispenser has independent `min_pulse_us`, `max_pulse_us`, `actuation_range`, `home_angle`, `release_angle`, `hold_seconds` and `settle_seconds` settings. The supplied 1000–2000 microsecond range and 0/65-degree commands are starting values, not measured dispensing positions. Calibrate each gate to release exactly one coin. The reported differences in servos 2 and 3 have not been diagnosed or corrected by guessing new limits.
+Each dispenser has independent `min_pulse_us`, `max_pulse_us`, `actuation_range`, `home_angle`, `release_angle`, `hold_seconds` and `settle_seconds` settings. The current configured home/release angles are PHP 1: 0°/70°, PHP 5: 0°/65°, PHP 10: 12°/108°, and PHP 20: 0°/90°; direction settings can mirror these positions. These are software settings, not proof of mechanical calibration.
 
-A common coin-exit sensor must detect coins from all four tubes. The UI advances only after a servo cycle reports exactly one detected exit. A missing or extra exit stops the payout.
+**Current configuration has `coin_exit_sensor = false`.** Although `drop_sensor_pin = 22` (physical pin 15) is reserved in the config, the backend does **not** open/read that sensor while disabled. In this mode it counts each completed servo actuation as one dispensed coin, without sensor confirmation. If a physical coin-exit sensor is installed and validated, it must be enabled and tested explicitly before the README can claim confirmed dispensing.
 
 ### Pulse mappings
 
@@ -156,7 +156,7 @@ Bills use a 3-second quiet period and coins use 2 seconds after the last transit
 ## Load inventory and enable hardware mode
 
 1. If no inventory file exists, create `inventory.json` using the structure in `inventory.example.json`. Enter physically counted coin quantities. Preserve any existing inventory file and reconcile it against the machine.
-2. With the channel mapping confirmed, verify the pulse maps, both acceptance-control circuits and every dispenser's one-coin cycle. Set only the corresponding `inhibit_verified` and `servo_verified` flags to true after those checks pass.
+2. Confirm the PCA9685 channel-to-dispenser mapping, verify pulse maps, both acceptance-control circuits, the TB74 power relay's safe timing, and every dispenser's one-coin cycle. Set `inhibit_verified` to true only after the corrected backend and physical controls pass fail-safe testing. `servo_verified` flags in the supplied config are already true; these flags do not prove the currently wired mechanisms were physically calibrated.
 3. Set `contact_number` to the staff contact shown on incident screens.
 4. Run the tests, then launch hardware mode:
 
@@ -169,15 +169,15 @@ For fullscreen, omit `--windowed`. You can choose another configuration with `--
 
 The updated `run_marby.sh` also launches this frontend in hardware mode and writes startup output to `marby.log`. An existing autostart entry using that script will use the integrated application after the files are replaced.
 
-Hardware startup is intentionally blocked by the supplied false verification flags. Changing those flags does not perform the physical checks.
+Hardware startup is intentionally blocked by `inhibit_verified.bill = false` and `inhibit_verified.coin = false`, pending re-verification of the changed relay wiring and safe power-control behavior. Changing those flags does not perform the physical checks.
 
 ## Connected transaction flow
 
 1. The touchscreen selects an exchange and an exact coin mix.
 2. Only the relevant acceptor is enabled on the insert screen, subject to stock checks.
-3. The first pulse commands intake closed. Complete calibrated groups are recorded before the credit appears on the UI.
+3. **Current backend behavior (not suitable for TB74 power switching):** the first pulse commands both acceptance outputs OFF. For an inhibit input this can close intake, but with a TB74 12 V power relay it may interrupt an in-progress bill. The bill power-control path must be revised and tested before real-money use. Complete calibrated pulse groups are recorded before credit appears on the UI.
 4. The customer confirms the payout. A worker performs one servo cycle at a time while the touchscreen remains responsive.
-5. Each confirmed coin updates the journal and inventory once. The collect screen appears after the entire payout is committed.
+5. **With the coin-exit sensor currently disabled**, each completed servo cycle is assumed to have dispensed one coin and updates journal/inventory; the software does not independently confirm physical exit. The collect screen appears after the planned payout is committed.
 
 A different supported bill can be rerouted to a rebuilt mix when the recorded inventory can pay its full value. The hardware handler rechecks the actual bill after acceptance, and inventory is checked again when the customer taps “Choose coins”. If the customer selected PHP 50 but the accepted PHP 100 cannot be paid, the screen shows “You inserted a PHP 100 bill”, “Not the PHP 50 you picked”, the staff contact and the existing transaction reference. No coin payout starts. The full accepted amount, actual bill and selected bill are saved in the fault journal and transaction history.
 
@@ -209,7 +209,7 @@ The supplied frontend uses a timer to simulate a successful cash-in. No real tra
 
 ## Validation
 
-The included tests exercise the actual frontend and backend with simulated Tk, GPIO, time, servo outputs and coin-exit events. They cover complete bill and coin exchanges, wrong bills, ambiguous groups, excess deposits, blocked demo hooks, duplicate confirmation, sensor failures, timeouts, restart protection, asynchronous payout, startup without optional fonts, curve transparency and antialiasing, bounded image caching, spinner image updates, shared transaction numbering, restart persistence, legacy-log import, concurrent number allocation and reference reuse through retries/incidents. They do not establish electrical safety, mechanical calibration, real GCash transfers or the display's physical appearance.
+The included tests exercise the actual frontend and backend with simulated Tk, GPIO, time, servo outputs and coin-exit events; the current production config has the coin-exit sensor disabled. They cover complete bill and coin exchanges, wrong bills, ambiguous groups, excess deposits, blocked demo hooks, duplicate confirmation, sensor failures, timeouts, restart protection, asynchronous payout, startup without optional fonts, curve transparency and antialiasing, bounded image caching, spinner image updates, shared transaction numbering, restart persistence, legacy-log import, concurrent number allocation and reference reuse through retries/incidents. They do not establish electrical safety, mechanical calibration, real GCash transfers or the display's physical appearance.
 
 ## Files
 
