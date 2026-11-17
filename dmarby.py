@@ -1621,7 +1621,20 @@ class Kiosk:
                20, True, WHITE, width=650)
         self.back(self.go("exchange_type"))
 
+    def gcash_limit_reached(self):
+        return self.notification_store().daily_count() >= 5
+
+    def s_gc_daily_limit(self):
+        self.title("GCash daily limit reached", 105, 32)
+        self.t(W / 2, 222, "All 5 GCash cash-ins for today have been used.",
+               20, True, WHITE, width=690)
+        self.t(W / 2, 264, "Please come back tomorrow.", 18, False, WHITE)
+        self.back(self.go("exchange_type"))
+
     def start_gcash(self):
+        if self.gcash_limit_reached():
+            self.show("gc_daily_limit")
+            return
         self.reset_session()
         self.flow = "gcash"
         self.show("gc_number")
@@ -1783,6 +1796,9 @@ class Kiosk:
         self.redraw()
 
     def gc_name_next(self):
+        if self.gcash_limit_reached():
+            self.show("gc_daily_limit")
+            return
         self.gc_name = " ".join(self.gc_name_buf.split())
         if self.gcash_balance < GCASH_MAX_INSERT:
             self.show("gc_unavailable")
@@ -1812,13 +1828,12 @@ class Kiosk:
         """Persist the request and its email before the cash journal closes."""
         from dmarby_integration import now
         self.gc_ref = self.ensure_reference()
-        if DEMO_MODE and os.environ.get("DMARBY_EMAIL_DEMO") != "1":
-            return
         self.notification_store().request({
             "reference": self.gc_ref, "account_name": self.gc_name,
             "number": self.gc_number_buf, "amount": self.gc_amount, "fee": self.gc_fee,
             "cash_received": self.credit, "time": now(),
-            "mode": "demo" if DEMO_MODE else "hardware"})
+            "mode": "demo" if DEMO_MODE else "hardware"},
+            send_email=not DEMO_MODE or os.environ.get("DMARBY_EMAIL_DEMO") == "1")
 
     def cashing_result(self, ok):
         """No GCash API: save the request so staff can send it manually."""

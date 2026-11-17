@@ -551,6 +551,8 @@ def format_admin_email(subject, body):
     return subject, plain, html
 
 
+GCASH_DAILY_LIMIT = 5
+
 class Notifications:
     def __init__(self, path):
         self.path = str(path)
@@ -589,7 +591,25 @@ class Notifications:
             db.execute('INSERT OR IGNORE INTO outbox(id,subject,body) VALUES(?,?,?)',
                        (key, '[D’ MARBY] '+subject, body))
 
-    def request(self, details):
+    def daily_count(self):
+        """Count today's submitted requests in Philippine time, including sent ones."""
+        today = datetime.now(ZoneInfo('Asia/Manila')).date().isoformat()
+        with self.connect() as db:
+            records = db.execute("SELECT details, status FROM requests").fetchall()
+        count = 0
+        for raw, status in records:
+            if status in ('refunded', 'cancelled'):
+                continue
+            try:
+                stamp = datetime.fromisoformat(json.loads(raw).get('time', ''))
+                if stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=ZoneInfo('Asia/Manila'))
+                count += stamp.astimezone(ZoneInfo('Asia/Manila')).date().isoformat() == today
+            except (ValueError, TypeError, AttributeError):
+                continue
+        return count
+
+    def request(self, details, send_email=True):
         ref = details['reference']
         if (not details.get('account_name', '').strip() or
                 len(details.get('number', '')) != 11 or not details['number'].startswith('09') or
@@ -597,16 +617,33 @@ class Notifications:
                 details['cash_received'] != details['amount'] + details['fee']):
             raise ValueError('Invalid or unpaid GCash request')
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             previous = db.execute('SELECT details FROM requests WHERE ref=?', (ref,)).fetchone()
             if previous:
                 existing = json.loads(previous[0])
                 details = dict(details, time=existing.get('time')) if 'time' in existing else details
                 if existing != details:
                     raise ValueError('Reference already belongs to a different request')
+            if not previous:
+                today = datetime.now(ZoneInfo('Asia/Manila')).date().isoformat()
+                count = 0
+                for (raw, status) in db.execute("SELECT details, status FROM requests").fetchall():
+                    if status in ('refunded', 'cancelled'):
+                        continue
+                    try:
+                        stamp = datetime.fromisoformat(json.loads(raw).get('time', ''))
+                        if stamp.tzinfo is None:
+                            stamp = stamp.replace(tzinfo=ZoneInfo('Asia/Manila'))
+                        count += stamp.astimezone(ZoneInfo('Asia/Manila')).date().isoformat() == today
+                    except (ValueError, TypeError, AttributeError):
+                        continue
+                if count >= GCASH_DAILY_LIMIT:
+                    raise ValueError('Daily GCash limit reached (5 transactions).')
             body = json.dumps(details, ensure_ascii=False, indent=2)
             db.execute('INSERT OR IGNORE INTO requests(ref,details) VALUES(?,?)', (ref,body))
-            db.execute('INSERT OR IGNORE INTO outbox(id,subject,body) VALUES(?,?,?)',
-                       ('gcash:'+ref, '[D’ MARBY] Manual GCash cash-in request '+ref, body))
+            if send_email:
+                db.execute('INSERT OR IGNORE INTO outbox(id,subject,body) VALUES(?,?,?)',
+                           ('gcash:'+ref, '[D’ MARBY] Manual GCash cash-in request '+ref, body))
 
     def get_request(self, ref):
         with self.connect() as db:
