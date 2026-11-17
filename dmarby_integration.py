@@ -128,10 +128,20 @@ class KioskHardwareMixin:
                 elif self.flow in ("break", "combine", "gcash") and self.credit < self.target:
                     source = "coin"
             if source is not None:
-                if not self.hardware.storage.ready_for_source(source, self.hardware.maps[source].values()):
+                if self.flow in ("bill", "break", "combine"):
+                    # Cash exchanges require only the selected payout mix.
+                    # Unrelated denominations are not reserved for hypothetical refunds.
+                    plan = self.plan
+                    ready = (sum(c * n for c, n in plan.items()) == self.target
+                             and self.hardware.storage.can_pay(plan))
+                else:
+                    # GCash has no selected coin payout; keep its existing guard.
+                    ready = self.hardware.storage.ready_for_source(
+                        source, self.hardware.maps[source].values())
+                if not ready:
                     self.hardware.set_acceptance(None)
                     if self.credit:
-                        self._hardware_fault("Inventory cannot cover the accepted deposit.")
+                        self._hardware_fault("The selected payout mix is no longer available.")
                     else:
                         self.show("out_of_coins")
                     return
