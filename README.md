@@ -56,36 +56,92 @@ On first use, existing completed cash/GCash entries in `transactions.log` are co
 
 ## Hardware settings to confirm
 
-GPIO numbers are BCM numbers. Never connect acceptor 12 V signals directly to Raspberry Pi GPIO. Keep the tested isolated acceptor pulse wiring and externally powered servo wiring.
+GPIO numbers are **BCM** numbers unless a physical header pin is explicitly stated. Never connect acceptor 12 V signals directly to Raspberry Pi GPIO. Keep the tested isolated acceptor pulse wiring and externally powered servo wiring unchanged.
 
-| Function | BCM GPIO | Physical pin |
+| Function | BCM GPIO | Raspberry Pi physical pin |
 |---|---:|---:|
-| Allan coin pulses | 17 | 11 |
-| TB74 bill pulses | 27 | 13 |
-| Coin-exit sensor | 22 | 15 |
-| TB74 acceptance control | 23 | 16 |
-| Allan acceptance control — reserved until established | 24 | 18 |
+| Allan coin pulses (existing PC817 input path) | 17 | 11 |
+| TB74 bill pulses (existing PC817 input path) | 27 | 13 |
+| Coin-exit sensor (configured but **disabled**) | 22 | 15 |
+| Allan coin-acceptor INHIBIT relay control | **16** | **36** |
+| TB74 bill-acceptor 12 V **power** relay control (active LOW) | **26** | **37** |
 | PCA9685 SDA | 2 | 3 |
 | PCA9685 SCL | 3 | 5 |
 
-The software cannot provide physical acceptance control through an unidentified or unwired inhibit input. Keep the verification flags false until both acceptors reject cash when disabled and preserve the complete current pulse group.
+### Relay controls: current physical plan
+
+- **Allan (physical pin 36 / GPIO16):** GPIO16 operates the relay used for Allan's INHIBIT function. The Allan relay's **trigger polarity and resulting accept/reject state have not yet been confirmed**; verify both GPIO levels physically before using cash.
+- **TB74 (physical pin 37 / GPIO26):** GPIO26 operates an **active-LOW relay** that switches the acceptor's 12 V positive supply, **not** the TB74 INHIBIT terminals. GPIO26 **LOW** energizes the relay (TB74 powered if the contacts are wired correctly); GPIO26 **HIGH** releases it (TB74 unpowered with normally-open contacts). Leave the normally-closed contact unused for this power-off-default arrangement.
+- The relay module must be electrically suitable for a Raspberry Pi's **3.3 V GPIO trigger** and its actual supply/terminal layout. The GPIO only drives the module control input; it must **never carry the TB74's 12 V power or relay-coil current**. Verify supply, fuse, contact rating, wiring and unpowered state with an electronics supervisor.
+- **Do not turn off the TB74 while it is transporting a bill or transmitting a pulse group.** Switching the 12 V power is not the same as asserting TB74 INHIBIT, which leaves the mechanism energized. Only turn off power after the bill path is known to be idle.
+- Test relay responses **without inserting cash**, and verify the TB74 is unpowered when the relay is released and during Raspberry Pi shutdown or reboot. A control signal being HIGH in a Python script does not by itself prove a fail-safe boot state.
+
+**Code/config alignment:** `coin_changer_config.json` now sets `inhibit_pin.bill = 26` (physical pin 37), `inhibit_pin.coin = 16` (physical pin 36), and `inhibit_active_high.bill = false` for the active-LOW TB74 relay. The Allan relay retains the **unverified** `inhibit_active_high.coin = true` setting until its actual trigger polarity and accept/reject behavior are confirmed. `inhibit_verified` is **false for both**, so the backend intentionally blocks hardware mode until testing. **Critically, the existing backend still commands intake closed on the first pulse**; this must be redesigned before using GPIO26 to switch bill acceptor power, or the machine could cut power during bill transport. The config pin correction alone does not implement safe TB74 power sequencing.
+
+#### Manual GPIO relay test (no money inserted)
+
+Stop D'MARBY and other GPIO tests first. The following test sends levels to the relay inputs; it **does not** integrate them into transaction handling. Use the Pi's `.venv-pi` environment if that is where `gpiozero`/`lgpio` is installed:
+
+```bash
+cd ~/Marby-1.0
+GPIOZERO_PIN_FACTORY=lgpio .venv-pi/bin/python - <<'PY'
+from gpiozero import OutputDevice
+
+allan = OutputDevice(16, active_high=True, initial_value=True)
+bill = OutputDevice(26, active_high=True, initial_value=True)
+
+print("1=Allan LOW  2=Allan HIGH  3=TB74 power ON (LOW)")
+print("4=TB74 power OFF (HIGH)  5=both GPIO HIGH  q=quit")
+try:
+    while True:
+        cmd = input("Relay test> ").strip().lower()
+        if cmd == "1":
+            allan.off()
+        elif cmd == "2":
+            allan.on()
+        elif cmd == "3":
+            bill.off()
+        elif cmd == "4":
+            bill.on()
+        elif cmd == "5":
+            allan.on()
+            bill.on()
+        elif cmd == "q":
+            break
+        else:
+            print("Choose 1, 2, 3, 4, 5 or q")
+            continue
+        print("Allan GPIO16:", "HIGH" if allan.value else "LOW",
+              "| TB74 GPIO26:", "HIGH" if bill.value else "LOW")
+except KeyboardInterrupt:
+    pass
+finally:
+    allan.on()
+    bill.on()
+    allan.close()
+    bill.close()
+    print("GPIO outputs reset HIGH; verify both relay states.")
+PY
+```
+
+Keep hardware-control verification disabled for **real cash intake** until the TB74 power relay has safe bill-completion sequencing, the Allan inhibit relay is tested, complete pulse groups are validated, and recovery behavior is confirmed.
 
 ### Four payout dispensers
 
 This frontend uses PHP 1, 5, 10 and 20 coins. The previous backend's fifth, 25-centavo dispenser remains supported for other configurations, but is not enabled by this frontend's configuration.
 
-**The denomination-to-channel assignments below have been confirmed by the user.** Dispenser calibration and coin-exit verification are separate checks.
+**Current `coin_changer_config.json` servo channel assignments** (PCA9685 channel numbers, 0–15) are listed below. Earlier README values 8/10/12/14 were described as physical sockets; they do **not** match the current software channel settings. Confirm actual dispenser wiring before powering the servos.
 
-| Payout coin | Confirmed PCA9685 socket |
+| Payout coin | Configured PCA9685 channel |
 |---:|---:|
-| PHP 1 | 8 |
-| PHP 5 | 10 |
-| PHP 10 | 12 |
-| PHP 20 | 14 |
+| PHP 1 | 5 |
+| PHP 5 | 4 |
+| PHP 10 | 1 |
+| PHP 20 | 0 |
 
-Each dispenser has independent `min_pulse_us`, `max_pulse_us`, `actuation_range`, `home_angle`, `release_angle`, `hold_seconds` and `settle_seconds` settings. The supplied 1000–2000 microsecond range and 0/65-degree commands are starting values, not measured dispensing positions. Calibrate each gate to release exactly one coin. The reported differences in servos 2 and 3 have not been diagnosed or corrected by guessing new limits.
+Each dispenser has independent `min_pulse_us`, `max_pulse_us`, `actuation_range`, `home_angle`, `release_angle`, `hold_seconds` and `settle_seconds` settings. The current configured home/release angles are PHP 1: 0°/70°, PHP 5: 0°/65°, PHP 10: 12°/108°, and PHP 20: 0°/90°; direction settings can mirror these positions. These are software settings, not proof of mechanical calibration.
 
-A common coin-exit sensor must detect coins from all four tubes. The UI advances only after a servo cycle reports exactly one detected exit. A missing or extra exit stops the payout.
+**Current configuration has `coin_exit_sensor = false`.** Although `drop_sensor_pin = 22` (physical pin 15) is reserved in the config, the backend does **not** open/read that sensor while disabled. In this mode it counts each completed servo actuation as one dispensed coin, without sensor confirmation. If a physical coin-exit sensor is installed and validated, it must be enabled and tested explicitly before the README can claim confirmed dispensing.
 
 ### Pulse mappings
 
@@ -100,28 +156,35 @@ Bills use a 3-second quiet period and coins use 2 seconds after the last transit
 ## Load inventory and enable hardware mode
 
 1. If no inventory file exists, create `inventory.json` using the structure in `inventory.example.json`. Enter physically counted coin quantities. Preserve any existing inventory file and reconcile it against the machine.
-2. With the channel mapping confirmed, verify the pulse maps, both acceptance-control circuits and every dispenser's one-coin cycle. Set only the corresponding `inhibit_verified` and `servo_verified` flags to true after those checks pass.
+2. Confirm the PCA9685 channel-to-dispenser mapping, verify pulse maps, both acceptance-control circuits, the TB74 power relay's safe timing, and every dispenser's one-coin cycle. Set `inhibit_verified` to true only after the corrected backend and physical controls pass fail-safe testing. `servo_verified` flags in the supplied config are already true; these flags do not prove the currently wired mechanisms were physically calibrated.
 3. Set `contact_number` to the staff contact shown on incident screens.
-4. Run the tests, then launch hardware mode:
+4. Run the tests before enabling real-money hardware mode:
 
 ```bash
 .venv/bin/python -m unittest -v test_marby.py test_dmarby_integration.py test_transaction_numbers.py
-.venv/bin/python dmarby.py --hardware --windowed
 ```
 
-For fullscreen, omit `--windowed`. You can choose another configuration with `--config /absolute/path/machine.json`. Inventory and journal paths are resolved relative to that configuration file.
+### Start D'MARBY on the configured Raspberry Pi
 
-The updated `run_marby.sh` also launches this frontend in hardware mode and writes startup output to `marby.log`. An existing autostart entry using that script will use the integrated application after the files are replaced.
+Open a terminal and type:
 
-Hardware startup is intentionally blocked by the supplied false verification flags. Changing those flags does not perform the physical checks.
+```bash
+marby
+```
+
+**`marby` is the existing startup command configured on this Raspberry Pi.** You do not need to type `python dmarby.py`, specify `--hardware`, or run `run_marby.sh` manually to launch the kiosk there. This command depends on the Pi's installed shell command/launcher; a fresh clone of the repository may not provide it automatically.
+
+For development or troubleshooting, `dmarby.py` still supports direct launch options such as `--windowed` and `--config /absolute/path/machine.json`, but these are not required for the normal `marby` startup command. Inventory and journal paths are resolved relative to the configuration file. The repository's `run_marby.sh` remains an alternative launcher, not the normal startup instruction.
+
+Hardware startup is intentionally blocked by `inhibit_verified.bill = false` and `inhibit_verified.coin = false`, pending re-verification of the changed relay wiring and safe power-control behavior. Changing those flags does not perform the physical checks.
 
 ## Connected transaction flow
 
 1. The touchscreen selects an exchange and an exact coin mix.
 2. Only the relevant acceptor is enabled on the insert screen, subject to stock checks.
-3. The first pulse commands intake closed. Complete calibrated groups are recorded before the credit appears on the UI.
+3. **Current backend behavior (not suitable for TB74 power switching):** the first pulse commands both acceptance outputs OFF. For an inhibit input this can close intake, but with a TB74 12 V power relay it may interrupt an in-progress bill. The bill power-control path must be revised and tested before real-money use. Complete calibrated pulse groups are recorded before credit appears on the UI.
 4. The customer confirms the payout. A worker performs one servo cycle at a time while the touchscreen remains responsive.
-5. Each confirmed coin updates the journal and inventory once. The collect screen appears after the entire payout is committed.
+5. **With the coin-exit sensor currently disabled**, each completed servo cycle is assumed to have dispensed one coin and updates journal/inventory; the software does not independently confirm physical exit. The collect screen appears after the planned payout is committed.
 
 A different supported bill can be rerouted to a rebuilt mix when the recorded inventory can pay its full value. The hardware handler rechecks the actual bill after acceptance, and inventory is checked again when the customer taps “Choose coins”. If the customer selected PHP 50 but the accepted PHP 100 cannot be paid, the screen shows “You inserted a PHP 100 bill”, “Not the PHP 50 you picked”, the staff contact and the existing transaction reference. No coin payout starts. The full accepted amount, actual bill and selected bill are saved in the fault journal and transaction history.
 
@@ -153,7 +216,7 @@ The supplied frontend uses a timer to simulate a successful cash-in. No real tra
 
 ## Validation
 
-The included tests exercise the actual frontend and backend with simulated Tk, GPIO, time, servo outputs and coin-exit events. They cover complete bill and coin exchanges, wrong bills, ambiguous groups, excess deposits, blocked demo hooks, duplicate confirmation, sensor failures, timeouts, restart protection, asynchronous payout, startup without optional fonts, curve transparency and antialiasing, bounded image caching, spinner image updates, shared transaction numbering, restart persistence, legacy-log import, concurrent number allocation and reference reuse through retries/incidents. They do not establish electrical safety, mechanical calibration, real GCash transfers or the display's physical appearance.
+The included tests exercise the actual frontend and backend with simulated Tk, GPIO, time, servo outputs and coin-exit events; the current production config has the coin-exit sensor disabled. They cover complete bill and coin exchanges, wrong bills, ambiguous groups, excess deposits, blocked demo hooks, duplicate confirmation, sensor failures, timeouts, restart protection, asynchronous payout, startup without optional fonts, curve transparency and antialiasing, bounded image caching, spinner image updates, shared transaction numbering, restart persistence, legacy-log import, concurrent number allocation and reference reuse through retries/incidents. They do not establish electrical safety, mechanical calibration, real GCash transfers or the display's physical appearance.
 
 ## Files
 
