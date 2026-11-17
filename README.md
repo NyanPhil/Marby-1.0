@@ -158,16 +158,23 @@ Bills use a 3-second quiet period and coins use 2 seconds after the last transit
 1. If no inventory file exists, create `inventory.json` using the structure in `inventory.example.json`. Enter physically counted coin quantities. Preserve any existing inventory file and reconcile it against the machine.
 2. Confirm the PCA9685 channel-to-dispenser mapping, verify pulse maps, both acceptance-control circuits, the TB74 power relay's safe timing, and every dispenser's one-coin cycle. Set `inhibit_verified` to true only after the corrected backend and physical controls pass fail-safe testing. `servo_verified` flags in the supplied config are already true; these flags do not prove the currently wired mechanisms were physically calibrated.
 3. Set `contact_number` to the staff contact shown on incident screens.
-4. Run the tests, then launch hardware mode:
+4. Run the tests before enabling real-money hardware mode:
 
 ```bash
 .venv/bin/python -m unittest -v test_marby.py test_dmarby_integration.py test_transaction_numbers.py
-.venv/bin/python dmarby.py --hardware --windowed
 ```
 
-For fullscreen, omit `--windowed`. You can choose another configuration with `--config /absolute/path/machine.json`. Inventory and journal paths are resolved relative to that configuration file.
+### Start D'MARBY on the configured Raspberry Pi
 
-The updated `run_marby.sh` also launches this frontend in hardware mode and writes startup output to `marby.log`. An existing autostart entry using that script will use the integrated application after the files are replaced.
+Open a terminal and type:
+
+```bash
+marby
+```
+
+**`marby` is the existing startup command configured on this Raspberry Pi.** You do not need to type `python dmarby.py`, specify `--hardware`, or run `run_marby.sh` manually to launch the kiosk there. This command depends on the Pi's installed shell command/launcher; a fresh clone of the repository may not provide it automatically.
+
+For development or troubleshooting, `dmarby.py` still supports direct launch options such as `--windowed` and `--config /absolute/path/machine.json`, but these are not required for the normal `marby` startup command. Inventory and journal paths are resolved relative to the configuration file. The repository's `run_marby.sh` remains an alternative launcher, not the normal startup instruction.
 
 Hardware startup is intentionally blocked by `inhibit_verified.bill = false` and `inhibit_verified.coin = false`, pending re-verification of the changed relay wiring and safe power-control behavior. Changing those flags does not perform the physical checks.
 
