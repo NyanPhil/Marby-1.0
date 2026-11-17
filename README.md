@@ -56,19 +56,75 @@ On first use, existing completed cash/GCash entries in `transactions.log` are co
 
 ## Hardware settings to confirm
 
-GPIO numbers are BCM numbers. Never connect acceptor 12 V signals directly to Raspberry Pi GPIO. Keep the tested isolated acceptor pulse wiring and externally powered servo wiring.
+GPIO numbers are **BCM** numbers unless a physical header pin is explicitly stated. Never connect acceptor 12 V signals directly to Raspberry Pi GPIO. Keep the tested isolated acceptor pulse wiring and externally powered servo wiring unchanged.
 
-| Function | BCM GPIO | Physical pin |
+| Function | BCM GPIO | Raspberry Pi physical pin |
 |---|---:|---:|
-| Allan coin pulses | 17 | 11 |
-| TB74 bill pulses | 27 | 13 |
+| Allan coin pulses (existing PC817 input path) | 17 | 11 |
+| TB74 bill pulses (existing PC817 input path) | 27 | 13 |
 | Coin-exit sensor | 22 | 15 |
-| TB74 acceptance control | 23 | 16 |
-| Allan acceptance control — reserved until established | 24 | 18 |
+| Allan coin-acceptor INHIBIT relay control | **16** | **36** |
+| TB74 bill-acceptor 12 V **power** relay control (active LOW) | **26** | **37** |
 | PCA9685 SDA | 2 | 3 |
 | PCA9685 SCL | 3 | 5 |
 
-The software cannot provide physical acceptance control through an unidentified or unwired inhibit input. Keep the verification flags false until both acceptors reject cash when disabled and preserve the complete current pulse group.
+### Relay controls: current physical plan
+
+- **Allan (physical pin 36 / GPIO16):** GPIO16 operates the relay used for Allan's INHIBIT function. The Allan relay's **trigger polarity and resulting accept/reject state have not yet been confirmed**; verify both GPIO levels physically before using cash.
+- **TB74 (physical pin 37 / GPIO26):** GPIO26 operates an **active-LOW relay** that switches the acceptor's 12 V positive supply, **not** the TB74 INHIBIT terminals. GPIO26 **LOW** energizes the relay (TB74 powered if the contacts are wired correctly); GPIO26 **HIGH** releases it (TB74 unpowered with normally-open contacts). Leave the normally-closed contact unused for this power-off-default arrangement.
+- The relay module must be electrically suitable for a Raspberry Pi's **3.3 V GPIO trigger** and its actual supply/terminal layout. The GPIO only drives the module control input; it must **never carry the TB74's 12 V power or relay-coil current**. Verify supply, fuse, contact rating, wiring and unpowered state with an electronics supervisor.
+- **Do not turn off the TB74 while it is transporting a bill or transmitting a pulse group.** Switching the 12 V power is not the same as asserting TB74 INHIBIT, which leaves the mechanism energized. Only turn off power after the bill path is known to be idle.
+- Test relay responses **without inserting cash**, and verify the TB74 is unpowered when the relay is released and during Raspberry Pi shutdown or reboot. A control signal being HIGH in a Python script does not by itself prove a fail-safe boot state.
+
+**Software integration is not finished:** `coin_changer_config.json` on this branch still lists `inhibit_pin.bill = 23` and `inhibit_pin.coin = 24` and sets both `inhibit_active_high` values to `true`. The new wiring uses **GPIO26/GPIO16**, and the TB74 relay is **active LOW**. The existing backend also commands intake closed on the **first pulse**; that behavior must **not** be applied directly to a bill-acceptor power relay. Update and test the backend's power-state sequencing before enabling unattended hardware transactions. The configuration currently marks `inhibit_verified` as true for both sources, but those flags do not establish verification of this changed physical setup.
+
+#### Manual GPIO relay test (no money inserted)
+
+Stop D'MARBY and other GPIO tests first. The following test sends levels to the relay inputs; it **does not** integrate them into transaction handling. Use the Pi's `.venv-pi` environment if that is where `gpiozero`/`lgpio` is installed:
+
+```bash
+cd ~/Marby-1.0
+GPIOZERO_PIN_FACTORY=lgpio .venv-pi/bin/python - <<'PY'
+from gpiozero import OutputDevice
+
+allan = OutputDevice(16, active_high=True, initial_value=True)
+bill = OutputDevice(26, active_high=True, initial_value=True)
+
+print("1=Allan LOW  2=Allan HIGH  3=TB74 power ON (LOW)")
+print("4=TB74 power OFF (HIGH)  5=both GPIO HIGH  q=quit")
+try:
+    while True:
+        cmd = input("Relay test> ").strip().lower()
+        if cmd == "1":
+            allan.off()
+        elif cmd == "2":
+            allan.on()
+        elif cmd == "3":
+            bill.off()
+        elif cmd == "4":
+            bill.on()
+        elif cmd == "5":
+            allan.on()
+            bill.on()
+        elif cmd == "q":
+            break
+        else:
+            print("Choose 1, 2, 3, 4, 5 or q")
+            continue
+        print("Allan GPIO16:", "HIGH" if allan.value else "LOW",
+              "| TB74 GPIO26:", "HIGH" if bill.value else "LOW")
+except KeyboardInterrupt:
+    pass
+finally:
+    allan.on()
+    bill.on()
+    allan.close()
+    bill.close()
+    print("GPIO outputs reset HIGH; verify both relay states.")
+PY
+```
+
+Keep hardware-control verification disabled for **real cash intake** until the power relay, Allan inhibit relay, complete pulse groups and safe recovery behavior are physically confirmed.
 
 ### Four payout dispensers
 
