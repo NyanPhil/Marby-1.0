@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from coin_changer_hardware import HardwareFault, RealHardware, payout_coins_for, atomic_json
+from dmarby import payable
 
 
 def load_config(filename):
