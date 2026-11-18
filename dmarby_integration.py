@@ -190,8 +190,14 @@ class KioskHardwareMixin:
             # The first wrong coin in Break Coins is already physically accepted.
             # Reuse the existing reroute page while preserving its stored credit.
             if self.flow == "break" and source == "coin" and len(self.inserted) == 1:
-                self.wrong = (self.target, value)
-                self.show("wrong_bill")
+                # The inserted coin is already held. Offer the same reroute
+                # as Bill to Coins only when smaller coins can repay it.
+                if not self.hardware.storage.can_make_exact(value) or not payable(
+                        value, self.smaller_stock(value)):
+                    self.incident("wrong_coin_unpayable", value)
+                else:
+                    self.wrong = (self.target, value)
+                    self.show("wrong_bill")
             else:
                 self._hardware_fault("Accepted coins exceed the selected total; staff must settle the balance.")
         else:

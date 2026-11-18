@@ -1310,6 +1310,9 @@ class Kiosk:
             # wrong-denomination screen, rather than silently discarding it.
             if self.flow == "break" and self.credit == 0:
                 self.add_credit("coin", value)
+                if not payable(value, self.smaller_stock(value)):
+                    self.incident("wrong_coin_unpayable", value)
+                    return True
                 self.wrong = (self.target, value)
                 self.show("wrong_bill")
                 return True
