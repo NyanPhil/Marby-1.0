@@ -40,7 +40,7 @@ FULLSCREEN = "--windowed" not in sys.argv
 ALLOW_ESCAPE = True
 DEMO_MODE = True                 # Default; --hardware selects the real backend.
 HARDWARE_MODE = False
-CONTACT_NUMBER = "09XX XXX XXXX"  # shown on incident screens
+CONTACT_NUMBER = "0993 620 0570"  # shown on incident screens
 
 BILLS = [50, 100]
 COINS = [20, 10, 5, 1]
@@ -853,7 +853,7 @@ class Kiosk:
         x1, x2 = 414, 770
         self.card(x1, y1, x2, y2)
         self.t(x1 + 26, y1 + 36, self.tr("Coin to coins"), 26, True, INK, "w")
-        self.t(x1 + 26, y1 + 66, self.tr("Break ₱5 or ₱10, or combine coins."), 15, False, GREY, "w")
+        self.t(x1 + 26, y1 + 66, self.tr("Break ₱5, ₱10 or ₱20, or combine coins."), 15, False, GREY, "w")
         for i, v in enumerate(sorted(COINS)):
             x = x1 + 52 + i * 84
             self.coin(v, x, y1 + 114)
@@ -1243,6 +1243,22 @@ class Kiosk:
             self.edge("right", "Cash in  →", self.start_cashing, done)
         else:
             self.edge("right", "Review  →", self.to_review_from_insert, done)
+        if "coin" in self.accepts() and not counting:
+            self.t(W / 2, 377, self.tr("Tip: insert one coin at a time."), 13, False, SOFT)
+        if "coin" in self.accepts() and not counting:
+            self.t(W / 2, 377, self.tr("Tip: insert one coin at a time."), 13, False, SOFT)
+        if "coin" in self.accepts() and not counting:
+            self.t(W / 2, 377, self.tr("Tip: insert one coin at a time."), 13, False, SOFT)
+        if "coin" in self.accepts() and not counting:
+            self.t(W / 2, 377, self.tr("Tip: insert one coin at a time."), 13, False, SOFT)
+        if "coin" in self.accepts() and not counting:
+            self.t(W / 2, 377, self.tr("Tip: insert one coin at a time."), 13, False, SOFT)
+        if "coin" in self.accepts() and not counting:
+            self.t(W / 2, 377, self.tr("Tip: insert one coin at a time."), 13, False, SOFT)
+        if "coin" in self.accepts() and not counting:
+            self.t(W / 2, 377, self.tr("Tip: insert one coin at a time."), 13, False, SOFT)
+        if "coin" in self.accepts() and not counting:
+            self.t(W / 2, 377, self.tr("Tip: insert one coin at a time."), 13, False, SOFT)
         if DEMO_MODE:
             self.demo_insert_row()
 

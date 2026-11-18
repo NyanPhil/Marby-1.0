@@ -105,6 +105,6 @@
     10,
     20
   ],
-  "contact_number": "Contact kiosk staff",
+  "contact_number": "0993 620 0570",
   "servo_mapping_note": "Angles are written the same for every servo. \"direction\" decides which way each one turns; clockwise ones are mirrored in code. If every servo turns the wrong way, set increasing_angle_turns_clockwise to true."
 }
