@@ -32,6 +32,7 @@ class KioskHardwareMixin:
         self._recovery_locked = False
         self._syncing = False
         self._deposit_open = None
+        self._pending_wrong_coin = None
         self._payout_future = None
         self._payout_coin = None
         self._verified_coin = None
@@ -122,7 +123,8 @@ class KioskHardwareMixin:
         self._syncing = True
         try:
             source = None
-            if self.screen == "insert" and not self.overlay and not self.fault:
+            if (self.screen == "insert" and not self.overlay and not self.fault
+                    and self._pending_wrong_coin is None):
                 if self.flow == "bill" and not self.credit:
                     source = "bill"
                 elif self.flow in ("break", "combine", "gcash") and self.credit < self.target:
@@ -192,15 +194,33 @@ class KioskHardwareMixin:
             if self.flow == "break" and source == "coin" and len(self.inserted) == 1:
                 # The inserted coin is already held. Offer the same reroute
                 # as Bill to Coins only when smaller coins can repay it.
-                if not payable(value, self.smaller_stock(value)):
-                    self.incident("wrong_coin_unpayable", value)
+                if not payable(self.credit, self.smaller_stock(self.credit)):
+                    self.incident("wrong_coin_unpayable", self.credit)
                 else:
-                    self.wrong = (self.target, value)
-                    self.show("wrong_bill")
+                    # Do not change screens while the acceptor is still
+                    # completing its pulse/frame. show() deliberately blocks
+                    # such transitions; retry once the input becomes idle.
+                    self.wrong = (self.target, self.credit)
+                    self._pending_wrong_coin = self.credit
+                    self.hardware.set_acceptance(None)
+                    self._finish_wrong_coin_reroute()
             else:
                 self._hardware_fault("Accepted coins exceed the selected total; staff must settle the balance.")
         else:
             self.show("insert")
+
+    def _finish_wrong_coin_reroute(self):
+        """Show the accepted wrong-coin page once the pulse train is idle."""
+        if self._pending_wrong_coin is None or self.fault:
+            return
+        if self.hardware.input_pending() or any(
+                inp.is_active for inp in self.hardware.inputs.values()):
+            return
+        if self.screen != "insert":
+            self._pending_wrong_coin = None
+            return
+        self._pending_wrong_coin = None
+        self.show("wrong_bill")
 
     def exit_incident(self):
         """Leave the receipt; the incident stays recorded and the kiosk keeps going."""
@@ -234,6 +254,7 @@ class KioskHardwareMixin:
                 self._cash_event(kind, value)
                 if self.fault:
                     break
+            self._finish_wrong_coin_reroute()
             pending = self.hardware.input_pending()
             changed = pending != self.counting_cash
             self.counting_cash = pending
@@ -308,6 +329,7 @@ class KioskHardwareMixin:
             self._hardware_fault(str(exc))
 
     def _hardware_fault(self, detail, kind="hardware", bill=None, picked_bill=None):
+        self._pending_wrong_coin = None
         self.hardware.stopping.set()
         try:
             self.hardware.set_acceptance(None)
