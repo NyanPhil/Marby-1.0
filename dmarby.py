@@ -1342,7 +1342,7 @@ class Kiosk:
         cx = W / 2
         is_coin = self.flow == "break" and bool(self.inserted) and self.inserted[-1][0] == "coin"
         if is_coin:
-            self.coin(value, cx, y1 + 74, 120)
+            self.coin(value, cx, y1 + 74, 84)
         else:
             self.note(value, cx, y1 + 74, 146)
         bx, by = cx + 70, y1 + 40

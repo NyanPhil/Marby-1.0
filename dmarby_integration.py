@@ -180,7 +180,7 @@ class KioskHardwareMixin:
             self._hardware_fault("Cash was accepted outside its deposit screen.")
             return
         self.notice = None
-        if source == "bill" and not self.hardware.storage.can_make_exact(value):
+        if source == "bill" and not payable(value, self.stock):
             self.incident("wrong_bill_unpayable" if value != self.target else "cant_change", value)
             return
         if source == "bill" and value != self.target:
@@ -192,8 +192,7 @@ class KioskHardwareMixin:
             if self.flow == "break" and source == "coin" and len(self.inserted) == 1:
                 # The inserted coin is already held. Offer the same reroute
                 # as Bill to Coins only when smaller coins can repay it.
-                if not self.hardware.storage.can_make_exact(value) or not payable(
-                        value, self.smaller_stock(value)):
+                if not payable(value, self.smaller_stock(value)):
                     self.incident("wrong_coin_unpayable", value)
                 else:
                     self.wrong = (self.target, value)
