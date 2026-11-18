@@ -748,36 +748,15 @@ class Kiosk:
         self.coin(20, 38, 32, 32)
         self.t(64, 32, "D' MARBY Coin Exchanger", 19, False, WHITE, "w")
 
-        # New D'MARBY logo from D'Marby-logo branch
-        self.rounded(116, 130, 692, 338, 28, "#112875")
-        self.rounded(112, 124, 688, 332, 28, WHITE)
-        self.t(W / 2, 168, self.tr("Welcome to"), 36, False, GREY)
-
-        wordmark = "D’MARBY"
-        wordmark_px = 60
-        while self.measure(wordmark, wordmark_px, True) > 394 and wordmark_px > 36:
-            wordmark_px -= 1
-
+        # Two large white lines directly on the blue background.
         stroke = ((-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0),
-                (-1, 1), (0, 1), (1, 1), (0, 0))
-
-        for offset_x, offset_y, colour in (
-            (4, 6, "#F2F4F8"),
-            (3, 4, "#E3E8F1"),
-            (2, 3, "#C2CDDF"),
-            (0, 0, INK),
-        ):
+                  (-1, 1), (0, 1), (1, 1), (0, 0))
+        for text, y in ((self.tr("Welcome to"), 180), ("D’ MARBY", 282)):
+            px = 76
+            while self.measure(text, px, True) > W - 160 and px > 44:
+                px -= 1
             for dx, dy in stroke:
-                self.t(
-                    W / 2 + offset_x + dx,
-                    237 + offset_y + dy,
-                    wordmark,
-                    wordmark_px,
-                    True,
-                    colour,
-                )
-
-        self.t(W / 2, 284, "COIN EXCHANGE", 15, True, GREY)
+                self.t(W / 2 + dx, y + dy, text, px, True, WHITE)
         self.edge("left", "Contact us", self.go("contact"), w=212)
         self.edge("right", "Start", self.go("paused" if self.fault else "exchange_type"), w=212)
 
