@@ -1243,22 +1243,13 @@ class Kiosk:
             self.edge("right", "Cash in  →", self.start_cashing, done)
         else:
             self.edge("right", "Review  →", self.to_review_from_insert, done)
-        if "coin" in self.accepts() and not counting:
-            self.t(W / 2, 377, self.tr("Tip: insert one coin at a time."), 13, False, SOFT)
-        if "coin" in self.accepts() and not counting:
-            self.t(W / 2, 377, self.tr("Tip: insert one coin at a time."), 13, False, SOFT)
-        if "coin" in self.accepts() and not counting:
-            self.t(W / 2, 377, self.tr("Tip: insert one coin at a time."), 13, False, SOFT)
-        if "coin" in self.accepts() and not counting:
-            self.t(W / 2, 377, self.tr("Tip: insert one coin at a time."), 13, False, SOFT)
-        if "coin" in self.accepts() and not counting:
-            self.t(W / 2, 377, self.tr("Tip: insert one coin at a time."), 13, False, SOFT)
-        if "coin" in self.accepts() and not counting:
-            self.t(W / 2, 377, self.tr("Tip: insert one coin at a time."), 13, False, SOFT)
-        if "coin" in self.accepts() and not counting:
-            self.t(W / 2, 377, self.tr("Tip: insert one coin at a time."), 13, False, SOFT)
-        if "coin" in self.accepts() and not counting:
-            self.t(W / 2, 377, self.tr("Tip: insert one coin at a time."), 13, False, SOFT)
+        if self.flow in ("break", "combine", "gcash") and (counting or "coin" in self.accepts()):
+            # Coins dropped too quickly can be miscounted, so ask for one at a time.
+            note = self.tr("Counting your coin. Please wait." if counting
+                           else "One coin at a time. Wait for the amount to update.")
+            w = self.measure(note, 14, True) + 36
+            self.pill(W / 2 - w / 2, 366, W / 2 + w / 2, 392, AMBER_SOFT)
+            self.t(W / 2, 379, note, 14, True, AMBER_TEXT)
         if DEMO_MODE:
             self.demo_insert_row()
 
