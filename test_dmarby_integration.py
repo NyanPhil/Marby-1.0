@@ -565,7 +565,6 @@ class IntegrationTests(unittest.TestCase):
         self.without_sensor()
         self.bill(100)
         self.train("bill", 10)
-        self.app.mix = Counter({20: 1, 10: 1, 5: 1, 1: 65})
         # Exact selected payouts must correspond to the paid amount.
         self.app.mix = Counter({20: 3, 10: 3, 5: 1, 1: 5})
         self.app.to_review_from_insert()
