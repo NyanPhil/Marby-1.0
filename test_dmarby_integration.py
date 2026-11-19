@@ -532,6 +532,67 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual((saved["20"], saved["10"]), (98, 99))
         self.assertEqual(self.app.hardware.storage.state["status"], "completed")
 
+    def test_parallel_payout_batches_distinct_denominations_and_accounts_each_coin(self):
+        self.without_sensor()
+        self.bill()  # PHP 50 -> two PHP 20 and one PHP 10
+        self.train("bill", 5)
+        self.app.to_review_from_insert()
+        launches = []
+        original = self.app.hardware.dispense_one
+
+        def observed(coin):
+            launches.append(coin)
+            return original(coin)
+
+        self.app.hardware.dispense_one = observed
+        self.app.start_dispense()
+        # Both dispensers are queued in the first round, never the same twice.
+        self.assertEqual(self.app.queue, [20, 10, 20])
+        self.assertEqual(launches, [20, 10])
+        self.assertEqual(set(self.app._payout_futures), {20, 10})
+        self.app._hardware_tick()
+        self.assertEqual(self.app.dropped, 2)
+        self.assertEqual(launches, [20, 10, 20])
+        self.app._hardware_tick()
+        self.assertEqual(self.app.dropped, 3)
+        self.app.finish_dispense()
+        self.assertEqual(self.app.screen, "done")
+        self.assertEqual(self.app.hardware.storage.state["dispensed"], {"20": 2, "10": 1})
+        self.assertEqual(self.app.hardware.storage.inventory["20"], 98)
+        self.assertEqual(self.app.hardware.storage.inventory["10"], 99)
+
+    def test_parallel_payout_four_different_denominations_in_one_round(self):
+        self.without_sensor()
+        self.bill(100)
+        self.train("bill", 10)
+        self.app.mix = Counter({20: 1, 10: 1, 5: 1, 1: 65})
+        # Exact selected payouts must correspond to the paid amount.
+        self.app.mix = Counter({20: 3, 10: 3, 5: 1, 1: 5})
+        self.app.to_review_from_insert()
+        launches = []
+        original = self.app.hardware.dispense_one
+        def observed(coin):
+            launches.append(coin)
+            return original(coin)
+        self.app.hardware.dispense_one = observed
+        self.app.start_dispense()
+        self.assertEqual(launches[:4], [20, 10, 5, 1])
+        self.assertEqual(len(self.app._payout_futures), 4)
+
+    def test_shared_exit_sensor_preserves_serial_payout(self):
+        self.bill()
+        self.train("bill", 5)
+        self.app.to_review_from_insert()
+        launches = []
+        original = self.app.hardware.dispense_one
+        def observed(coin):
+            launches.append(coin)
+            return original(coin)
+        self.app.hardware.dispense_one = observed
+        self.app.start_dispense()
+        self.assertEqual(launches, [20])
+        self.assertEqual(len(self.app._payout_futures), 1)
+
     def test_without_coin_exit_sensor_the_pin_is_not_required(self):
         self.app.close()
         cfg = dict(self.cfg, coin_exit_sensor=False)
