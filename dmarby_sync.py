@@ -34,6 +34,7 @@ from pathlib import Path
 CONFIG_DIR = Path.home() / ".config" / "dmarby"
 REPORT_EVERY_S = 15
 HEARTBEAT_EVERY_S = 60
+OFFLINE_AFTER_S = 120            # no answer from Supabase this long = offline
 BATCH = 200
 KIOSK_TIME = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 
@@ -64,10 +65,19 @@ class KioskSync:
         self.stop = threading.Event()
         self.thread = None
         self.last_error = None
+        self.last_contact = None   # monotonic time Supabase last answered
+        self.started_at = None
 
     @property
     def configured(self):
         return bool(self.url and self.key and self.kiosk_key)
+
+    def online(self):
+        """False once Supabase hasn't answered for OFFLINE_AFTER_S."""
+        if not self.configured or not self.thread:
+            return True   # sync is off: nothing to judge by, so don't block anything
+        since = self.last_contact or self.started_at
+        return time.monotonic() - since < OFFLINE_AFTER_S
 
     # -- HTTP ---------------------------------------------------------------
 
@@ -80,8 +90,10 @@ class KioskSync:
         try:
             with urllib.request.urlopen(request, timeout=15) as response:
                 body = response.read().decode("utf-8") or "null"
+                self.last_contact = time.monotonic()
                 return json.loads(body)
         except urllib.error.HTTPError as exc:
+            self.last_contact = time.monotonic()   # the server answered, so we're online
             try:
                 detail = json.loads(exc.read().decode("utf-8")).get("message", "")
             except Exception:
@@ -206,6 +218,7 @@ class KioskSync:
                     self.last_error = message
                 self.stop.wait(REPORT_EVERY_S)
 
+        self.started_at = time.monotonic()
         self.thread = threading.Thread(target=run, daemon=True, name="marby-sync")
         self.thread.start()
         return True
