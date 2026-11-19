@@ -32,7 +32,7 @@
     "coin": 16
   },
   "inhibit_active_high": {
-    "bill": false,
+    "bill": true,
     "coin": true
   },
   "coin_exit_sensor": false,
@@ -48,8 +48,8 @@
       "channel": 5,
       "direction": "clockwise",
       "enabled": true,
-      "home_angle": 15,
-      "release_angle": 100,
+      "home_angle": 12,
+      "release_angle": 110,
       "hold_seconds": 0.45,
       "settle_seconds": 0.3,
       "min_pulse_us": 1000,
