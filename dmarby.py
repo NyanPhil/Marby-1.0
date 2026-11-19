@@ -1634,10 +1634,25 @@ class Kiosk:
                20, True, WHITE, width=690)
         self.t(W / 2, 264, "Please come back tomorrow.", 18, False, WHITE)
         self.back(self.go("exchange_type"))
+    
+    def gcash_online(self):
+        sync = getattr(self, "dashboard_sync", None)
+        return sync is None or sync.online()
+
+    def s_gc_offline(self):
+        self.title("GCash is temporarily unavailable", 105, 32)
+        self.t(W / 2, 222, "The kiosk can't reach our team right now.",
+               20, True, WHITE, width=690)
+        self.t(W / 2, 264, "Cash exchanges still work. Please try GCash again later.",
+               18, False, WHITE, width=690)
+        self.back(self.go("exchange_type"))
 
     def start_gcash(self):
         if self.gcash_limit_reached():
             self.show("gc_daily_limit")
+            return
+        if not self.gcash_online():
+            self.show("gc_offline")
             return
         self.reset_session()
         self.flow = "gcash"
@@ -1803,6 +1818,9 @@ class Kiosk:
         if self.gcash_limit_reached():
             self.show("gc_daily_limit")
             return
+        if not self.gcash_online():
+            self.show("gc_offline")
+            return
         self.gc_name = " ".join(self.gc_name_buf.split())
         if self.gcash_balance < GCASH_MAX_INSERT:
             self.show("gc_unavailable")
@@ -1810,6 +1828,7 @@ class Kiosk:
         self.target = GCASH_MAX_INSERT
         self.notice = None
         self.show("insert")
+        
 
     def masked(self):
         n = self.gc_number_buf
