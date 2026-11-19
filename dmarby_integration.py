@@ -1,7 +1,8 @@
 """Connect the D'MARBY screens to the calibrated Raspberry Pi backend.
 
-All Tk work stays on the main thread. One worker handles sensor-confirmed
-servo cycles; the Tk loop consumes its result before updating the journal.
+All Tk work stays on the main thread. Distinct payout denominations can run in
+parallel when no shared exit sensor is enabled; the Tk loop journals each
+completed servo cycle separately. With a shared sensor, payout stays serial.
 """
 import json
 import sys
@@ -34,13 +35,13 @@ class KioskHardwareMixin:
         self._syncing = False
         self._deposit_open = None
         self._pending_wrong_coin = None
-        self._payout_future = None
-        self._payout_coin = None
+        self._payout_future = None  # first future in the active batch (legacy diagnostic)
+        self._payout_futures = {}    # denomination -> pending Future; one per dispenser
         self._verified_coin = None
         self.counting_cash = False
         self.references = self.make_reference_store()
         self.hardware = RealHardware(cfg, references=self.references)
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="marby-payout")
+        self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="marby-payout")
         try:
             super().__init__(root)
             self._hw_ready = True
@@ -263,16 +264,33 @@ class KioskHardwareMixin:
                 self.last_input = time.monotonic()
             if changed and self.screen == "insert" and not self.overlay:
                 self.redraw()
-            if self._payout_future is not None and self._payout_future.done():
-                future, coin = self._payout_future, self._payout_coin
-                self._payout_future = self._payout_coin = None
-                future.result()
-                if not self.fault:
-                    self.hardware.storage.confirmed(coin)
-                    self._verified_coin = coin
-                    self.coin_dropped(coin)
-                    if self.screen == "dispensing" and self.dropped < len(self.queue):
-                        self._next_coin()
+            # A round is complete only when *all* active dispensers finish.
+            # This avoids starting another cycle on a dispenser already in use.
+            if (self._payout_futures and
+                    all(future.done() for future in self._payout_futures.values())):
+                finished = self._payout_futures
+                self._payout_futures = {}
+                self._payout_future = None
+                failures = []
+                # Commit successful cycles even if a different dispenser failed.
+                # Those coins may already be in the customer tray.
+                for coin, future in finished.items():
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        failures.append(f"PHP {coin}: {exc}")
+                        continue
+                    if not self.fault:
+                        self.hardware.storage.confirmed(coin)
+                        self._verified_coin = coin
+                        self.coin_dropped(coin)
+                if failures and not self.fault:
+                    self._hardware_fault(
+                        "Parallel payout incomplete; count tray coins and reconcile. "
+                        + "; ".join(failures))
+                elif (not self.fault and self.screen == "dispensing"
+                      and self.dropped < len(self.queue)):
+                    self._next_coin()
             if not self.fault:
                 self._hardware_resume_tick()
                 self._sync_acceptance()
@@ -285,14 +303,20 @@ class KioskHardwareMixin:
         if self.fault or self.hardware.storage.state.get("status") != "paid":
             return
         refund = self.flow == "gcash" and self.screen == "insert"  # cancelled cash-in
-        if self._payout_future is not None or (self.screen != "review" and not refund):
+        if self._payout_futures or (self.screen != "review" and not refund):
             return
         try:
             self.hardware.set_acceptance(None)
             if self.hardware.input_pending():
                 raise HardwareFault("Cash counting must finish before payout.")
             self.hardware.storage.start(self.plan)
-            self.queue = [c for c in sorted(self.plan, reverse=True) for _ in range(self.plan[c])]
+            # Interleave denominations into rounds. A round never contains two
+            # coins from the same dispenser, and journal order matches UI order.
+            denominations = sorted(self.plan, reverse=True)
+            self.queue = [
+                coin for round_no in range(max(self.plan.values(), default=0))
+                for coin in denominations if self.plan[coin] > round_no
+            ]
             self.dropped = 0
             self.show("dispensing")
             self._next_coin()
@@ -300,11 +324,22 @@ class KioskHardwareMixin:
             self._hardware_fault(str(exc))
 
     def _next_coin(self):
-        if (self.fault or self.closed or self._payout_future is not None
+        """Start one payout round: up to four different dispensers together."""
+        if (self.fault or self.closed or self._payout_futures
                 or self.screen != "dispensing" or self.dropped >= len(self.queue)):
             return
-        self._payout_coin = self.queue[self.dropped]
-        self._payout_future = self._executor.submit(self.hardware.dispense_one, self._payout_coin)
+        batch = []
+        for coin in self.queue[self.dropped:]:
+            if coin in batch or (self.hardware.use_drop_sensor and batch):
+                break
+            batch.append(coin)
+            if len(batch) == 4:
+                break
+        # Set every future before the Tk polling loop can process completion.
+        for coin in batch:
+            self._payout_futures[coin] = self._executor.submit(
+                self.hardware.dispense_one, coin)
+        self._payout_future = next(iter(self._payout_futures.values()))
 
     def coin_dropped(self, value):
         # Only the worker's successful sensor-confirmed cycle can advance UI.
